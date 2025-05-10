@@ -8,27 +8,18 @@ import random
 from .parser import parse_partslist
 from .data_handler import save_to_csv
 from .part_scraper import ToyotaPartScraper
+from .scraper import BaseScraper
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class ToyotaPartsScraper:
+class ToyotaPartsScraper(BaseScraper):
     def __init__(self, base_url: str = "https://www.toyotapartsdeal.com/parts-list/2013-toyota-prius-plug_in/body/armrest_visor.html"):
         self.base_url = base_url
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
-
-    def fetch_page(self, url: str) -> Optional[str]:
-        """Fetch the page content from the given URL."""
-        try:
-            response = self.session.get(url)
-            response.raise_for_status()
-            return response.text
-        except requests.RequestException as e:
-            logger.error(f"Error fetching {url}: {str(e)}")
-            return None
 
     def scrape_partslist(self) -> Optional[Dict]:
         """Scrape list of all part numbers for given model."""

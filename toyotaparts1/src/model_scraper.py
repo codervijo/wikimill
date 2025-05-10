@@ -10,12 +10,12 @@ from .parser import parse_model
 from .data_handler import save_to_csv
 from .part_scraper import ToyotaPartScraper
 from .partslist_scraper import ToyotaPartsScraper
-
+from .scraper import BaseScraper
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class ToyotaModelScraper:
+class ToyotaModelScraper(BaseScraper):
     def __init__(self, base_url: str = "https://www.toyotapartsdeal.com"):
         self.base_url = base_url
         self.session = requests.Session()
