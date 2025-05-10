@@ -1,0 +1,3 @@
+[submodule "realestate/HomeHarvest"]
+	path = realestate/HomeHarvest
+	url = git@github.com:ZacharyHampton/HomeHarvest.git
