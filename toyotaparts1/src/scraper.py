@@ -12,12 +12,10 @@ class BaseScraper:
         self,
         base_url: str,
         parser_fn: Callable[[BeautifulSoup], Dict],
-        brand_name: str = "Generic"
     ):
         self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
         self.parser_fn = parser_fn
-        self.brand_name = brand_name
 
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
