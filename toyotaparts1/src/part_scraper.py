@@ -27,12 +27,7 @@ class ToyotaPartScraper(BaseScraper):
             return None
 
         # Save HTML to output/ for debugging
-        os.makedirs("output", exist_ok=True)
-        safe_filename = "partinfo.html"
-        output_path = os.path.join("output", safe_filename)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(html_content)
-        logger.info(f"Saved HTML to {output_path}")
+        self.save_debug_html("partinfo", html_content)
 
         soup = BeautifulSoup(html_content, 'html.parser')
         return parse_part_details(soup)

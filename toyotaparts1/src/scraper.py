@@ -32,10 +32,11 @@ class BaseScraper:
             logger.error(f"[{self.brand_name}] Error fetching {url}: {str(e)}")
             return None
 
-    def _save_html_debug(self, part_number: str, html: str):
+    # Save HTML to output/ for debugging
+    def save_debug_html(self, filename: str, html: str):
         os.makedirs("output", exist_ok=True)
-        filename = part_number.replace("~", "_") + ".html"
+        filename = filename.replace("~", "_") + ".html"
         path = os.path.join("output", filename)
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
-        logger.info(f"[{self.brand_name}] Saved HTML to {path}")
+        logger.info(f"Debug HTML Saved HTML to {path}")
