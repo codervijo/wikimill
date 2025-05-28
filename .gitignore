@@ -1,1 +1,16 @@
-output
+**/output/
+# Ignore all virtual environments
+venv/
+.env/
+ENV/
+env/
+**/venv/
+**/env/
+
+# Bytecode
+**/__pycache__/
+*.py[cod]
+
+# VSCode and other editor settings
+.vscode/
+.idea/
