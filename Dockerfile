@@ -33,11 +33,13 @@ ENV PATH="/venv/bin:$PATH"
 # Install Scrapy and additional Python dependencies inside the virtual environment
 RUN pip install --no-cache-dir scrapy selenium googlemaps beautifulsoup4==4.12.2 fake-useragent
 RUN pip install scrapy-playwright selenium fake_useragent
-RUN apt-get install -y tidy
+#RUN apt-get install -y tidy
 
 # Install Ollama
 RUN apt-get update && apt-get install -y pciutils lshw
-RUN curl -fsSL https://ollama.com/install.sh | sh
+# Install Ollama (CPU-only mode)
+#ENV OLLAMA_NO_CUDA=1
+#RUN curl -fsSL https://ollama.com/install.sh | sh
 
 # Install Google Chrome for Selenium (headless mode)
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | tee /usr/share/keyrings/google-linux-signing-key.asc \
@@ -50,6 +52,12 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | tee /usr/sh
 RUN wget -q https://chromedriver.storage.googleapis.com/113.0.5672.63/chromedriver_linux64.zip \
     && unzip chromedriver_linux64.zip -d /usr/local/bin \
     && rm chromedriver_linux64.zip
+
+# Pip 
+RUN pip3 install pandas openpyxl
+RUN pip3 install discord_webhook Discord
+RUN pip3 install tweepy dotenv
+RUN curl -Ls https://astral.sh/uv/install.sh | sh
 
 # Set up app directory
 WORKDIR /usr/src/app

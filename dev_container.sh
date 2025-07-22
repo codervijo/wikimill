@@ -1,6 +1,6 @@
 #!/bin/bash
 
-CONTAINER=lscrape1
+CONTAINER=lscrape3
 HOST_PORT=6000
 CONTAINER_PORT=3445
 VOLUME_MOUNT="${PWD}:/usr/src/app/"
