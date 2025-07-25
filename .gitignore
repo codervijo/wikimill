@@ -14,3 +14,7 @@ env/
 # VSCode and other editor settings
 .vscode/
 .idea/
+
+#node 
+**/node_modules/
+**/__pycache__
