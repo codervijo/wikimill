@@ -3,7 +3,7 @@
 # Script to run Playwright's code generation tool
 
 # Default values
-URL="https://playwright.dev"
+URL="https://maps.google.com"
 OUTPUT_FILE="generated.py"
 LANGUAGE="python"
 
