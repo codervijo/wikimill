@@ -11,6 +11,9 @@ importers:
       playwright:
         specifier: ^1.54.1
         version: 1.54.1
+      stable:
+        specifier: ^0.1.8
+        version: 0.1.8
 
 packages:
 
@@ -29,6 +32,10 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
+  stable@0.1.8:
+    resolution: {integrity: sha512-ji9qxRnOVfcuLDySj9qzhGSEFVobyt1kIOSkj1qZzYLzq7Tos/oUUWvotUPQLlrsidqsK6tBH89Bc9kL5zHA6w==}
+    deprecated: 'Modern JS already guarantees Array#sort() is a stable sort, so this library is deprecated. See the compatibility table on MDN: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/sort#browser_compatibility'
+
 snapshots:
 
   fsevents@2.3.2:
@@ -41,3 +48,5 @@ snapshots:
       playwright-core: 1.54.1
     optionalDependencies:
       fsevents: 2.3.2
+
+  stable@0.1.8: {}

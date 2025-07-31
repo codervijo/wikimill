@@ -35,12 +35,18 @@ buildsh:
 
 # Install global dependencies
 deps:
+	@echo "Installing Python dependencies..."
+	@pip install -r requirements.txt
+	@echo "Installing Playwright for Python..."
+	@pip install playwright
+	@echo "Installing Playwright browser binaries..."
+	@python3 -m playwright install --with-deps
 	@echo "Installing pnpm and Vite dependencies..."
 	@SHELL=/bin/bash pnpm setup
 	@export PNPM_HOME=$(pnpm env get home) && export PATH="$$PNPM_HOME:$$PATH"
 	@SHELL=/bin/bash pnpm install stable
-	@source /root/.bashrc && pnpm add -g vite create-vite
-	@echo "Dependencies installed."
+	@pnpm add -g vite create-vite
+	@echo "All dependencies installed."
 
 build:
 ifeq ($(IS_DOCKER),no)
