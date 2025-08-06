@@ -35,6 +35,8 @@ buildsh:
 
 # Install global dependencies
 deps:
+	@echo "Installing system dependencies..."
+	@apt update && apt install -y xvfb
 	@echo "Installing Python dependencies..."
 	@pip install -r requirements.txt
 	@echo "Installing Playwright for Python..."
@@ -71,7 +73,10 @@ reclaim:
 
 # Clean the project
 clean:
-	rm -rf package.json package-lock.json node_modules/
+	./dev_container.sh stop
+	./dev_container.sh delete
+	sudo rm -rf package.json package-lock.json node_modules/
+	sudo rm -rf /tmp/.docker.xauth
 
 # Generate the documentation
 doc:

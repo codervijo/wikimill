@@ -86,10 +86,10 @@ RUN curl -sSL https://astral.sh/uv/install.sh | bash && cp /root/.local/bin/uv /
 ENV PATH="/root/.local/bin:$PATH"
 
 # Set working directory for your app
-WORKDIR /usr/src/app/workspace
+WORKDIR /usr/src/app/
 
 # Copy app files
-COPY . /usr/src/app/workspace
+#COPY . /usr/src/app/workspace
 
 # Set up pnpm
 RUN SHELL=/bin/bash pnpm setup
