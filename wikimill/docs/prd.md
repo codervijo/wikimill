@@ -2,7 +2,7 @@
 
 The canonical source of truth for purpose, scope, phases, and conformance. Code that contradicts this doc is drift, not feature.
 
-> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.D` shipped the same day; `v1.E` (the crawler) is next.
+> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.E` shipped the same day; `v1.F` (the classifier) is next.
 
 ## 1. Purpose
 
@@ -137,7 +137,7 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 | v1.B | ✅ done | Scaffold: `pyproject.toml` (uv), `Dockerfile`, `Makefile` + `Makefile.local` (container `wikimill1`), `bin/wikimill` launcher + `bin/install`, `wikimill.env` config/secrets loading + `.example` + gitignore, SQLite schema + migrations, `preflight`, logging/markers |
 | v1.C | ✅ done | SQL ingest: streaming `INSERT`-tuple parser, reversed-domain un-mangling, page-ID slice filter, namespace-filter verification → `wiki_pages` (id+title from the index) + `external_links` (context columns null) |
 | v1.D | ✅ done | Normalization + dedup (§10) → `urls` + `domains`; archive-URL unwrapping; scheme / internal-domain / resolver filtering |
-| v1.E | ⏳ pending | Crawler: robots-aware, rate-limited, redirect-tracking `httpx` fetcher → append-only `url_checks` |
+| v1.E | ✅ done | Crawler: robots-aware, rate-limited, redirect-tracking `httpx` fetcher → append-only `url_checks` |
 | v1.F | ⏳ pending | Classifier: the eleven-state vocabulary (§11) + URL state machine + bounded evidence capture |
 | v1.G | ⏳ pending | Domain checks: multi-resolver DNS + RDAP → `domain_checks` + domain state; `unregistered` established here |
 | v1.H | ⏳ pending | **`enrich`**: multistream index loader → **offset-sorted, block-batched** seek/decompress → `mwparserfromhell` → section, anchor, ref/cite context, dead-link tags, for the selected subset only |
@@ -145,6 +145,20 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 | v1.J | ⏳ pending | First full bounded run + soak; measure everything §19 asks for |
 
 #### Design notes
+
+**v1.E** — ✅ shipped 2026-07-25. The crawler: `crawl/guard.py` (SSRF), `crawl/robots.py` (RFC 9309), `crawl/politeness.py` (backoff, circuit breaker), `crawl/fetcher.py`, `crawl/runner.py`. First phase to touch the network, so §17 politeness and §18 security stop being theory. **It records evidence and does not classify** — v1.F re-judges these very rows offline, with no refetching.
+
+Two structural properties, chosen so they cannot quietly rot: **work is partitioned by registrable domain** and each partition goes to exactly one worker, so per-domain concurrency of 1 is a property of the shape rather than a lock a later change could drop; and **only the main thread writes**, so Ctrl-C can never interrupt a half-written batch.
+
+Three bugs found by running it for real, all fixed:
+
+1. **A silent hang.** I passed the main thread's SQLite connection into workers for robots caching; connections are thread-bound, so every worker died instantly — and `ThreadPoolExecutor` swallowed the exceptions into futures I never checked, so the main thread blocked on `out.get()` forever with no output at all. The robots store is now a plain dict (main thread loads and persists it), every task emits exactly one result even on failure, and the collector polls with a timeout plus a liveness check that raises if workers died. A worker bug is now a loud error, never a hang.
+2. **robots.txt truncated at 8 KB.** The robots fetch reused the evidence-blob cap, so a larger file lost its later rules and we could have fetched something disallowed — breaking a rule the PRD says is honoured unconditionally. `max_evidence` is now separate from `max_body`.
+3. **`content_length` recorded the declared header** rather than the bytes observed. A server's claim can be wrong, and the classifier uses this to judge thin bodies, so it must match what was hashed and stored.
+
+Also corrected: `classify_address` checked `is_private` before `is_link_local`/`is_unspecified`, so every diagnostic read "private range" and told the operator nothing.
+
+**Verified against real sites** (identifying as `vik@lamill.us`): 15 URLs crawled across 15 domains, robots.txt fetched and cached per origin, 2 URLs `blocked_by_robots` and never fetched at all, and a real find already — `iht.com` returns 403 with title `nytimes.com` and `cross_domain_redirect=1`, the International Herald Tribune absorbed into NYT. Two hosts whose robots.txt was unreachable were treated as complete disallow per RFC 9309, which is the counter-intuitive rule that matters: a struggling server must not be hammered on the assumption that silence means consent. Re-running re-selects zero already-checked URLs. 290 hermetic tests.
 
 **v1.D** — ✅ shipped 2026-07-25. Stage 2: `normalize/url.py` (RFC 3986 + the §10 policy layer), `normalize/domain.py` (PSL via `tldextract`), `normalize/archive.py` (archive unwrapping). Normalization runs **inline in `ingest`** rather than as a later rewrite pass, so `url_hash` is the normalized hash from the moment a row exists — a rewrite pass would have had to mutate a UNIQUE key and then merge the collisions it created. Existing databases are re-ingested, not migrated; that was the plan from v1.C.
 

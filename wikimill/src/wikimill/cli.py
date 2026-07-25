@@ -17,6 +17,7 @@ import typer
 
 from . import __version__
 from . import ingest as ingest_stage
+from .crawl import runner as crawl_stage
 from .config import load as load_config
 from .constants import EXIT_INTERRUPTED, EXIT_OK, RunKind
 from .errors import Interrupted, NotImplementedYetError, WikimillError
@@ -225,7 +226,10 @@ def crawl(
     ] = False,
 ) -> None:
     """Crawl pending and due URLs, honouring robots.txt and per-host politeness."""
-    raise NotImplementedYetError("crawl", "v1.E")
+    cfg = load_config()
+    with RunLog(RunKind.CRAWL, cfg.logs_dir) as log:
+        gate(cfg, log)
+        crawl_stage.run(cfg, log, limit=limit, concurrency=concurrency, force=force)
 
 
 @app.command()

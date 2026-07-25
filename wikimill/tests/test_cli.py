@@ -92,7 +92,6 @@ def test_stats_json():
 @pytest.mark.parametrize(
     ("command", "phase"),
     [
-        (["crawl"], "v1.E"),
         (["check"], "v1.G"),
         (["enrich"], "v1.H"),
         (["inspect", "example.com"], "v1.I"),

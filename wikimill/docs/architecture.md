@@ -2,7 +2,7 @@
 
 How this project is built. Mechanisms, schemas, modules, and integrations. The "HOW" companion to `docs/prd.md`'s "WHY / WHAT".
 
-Status: **v1.B–v1.D shipped** (scaffold, config, storage, preflight, launcher, SQL ingest, normalization). Everything below marked *(vN.X)* is planned, not built.
+Status: **v1.B–v1.E shipped** (scaffold, config, storage, preflight, launcher, SQL ingest, normalization, crawler). Everything below marked *(vN.X)* is planned, not built.
 
 ## 1. Project layout
 
@@ -34,12 +34,17 @@ wikimill/
 │   │   ├── url.py             #   RFC 3986 + the §10 policy layer
 │   │   ├── domain.py          #   PSL / registrable domain (tldextract)
 │   │   └── archive.py         #   unwrap wayback / archive.today
-│   ├── crawl/                 # (v1.E) fetcher.py · robots.py · politeness.py
+│   ├── crawl/                 # v1.E: stage 3, the HTTP crawler
+│   │   ├── guard.py           #   SSRF / address-space guards
+│   │   ├── robots.py          #   robots.txt cache + RFC 9309 semantics
+│   │   ├── politeness.py      #   backoff, per-host pacing, circuit breaker
+│   │   ├── fetcher.py         #   one URL -> one url_checks row of evidence
+│   │   └── runner.py          #   domain-partitioned workers, single writer
 │   ├── classify/              # (v1.F) http.py · parked.py · soft404.py · state.py
 │   ├── domain/                # (v1.G) dns.py · rdap.py
 │   ├── enrich/                # (v1.H) select.py · seek.py · wikitext.py
 │   └── export.py              # (v1.I) scoring + candidate file
-├── tests/                     # 232 tests, hermetic (no network, no Docker)
+├── tests/                     # 290 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -222,13 +227,14 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 11. Testing
 
-232 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+290 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness
 - `test_preflight.py` — per-check markers, the gate, "every ✗ names a fix"
 - `test_cli.py` — command surface, exit codes, stubs naming their phase
 - `test_logging.py` — markers, JSONL, stderr/stdout split, colour suppression
+- `test_crawl.py` — SSRF guards, robots.txt, fetcher, politeness (MockTransport + fake resolver)
 - `test_normalize.py` — canonicalization, archive unwrapping, PSL, filtering
 - `test_eldomain.py` / `test_dump_sql.py` / `test_ingest.py` — v1.C parsers + stage
 - `test_launcher.py` — drives the bash launcher via `WIKIMILL_DRY_RUN` and the installer via `DRY_RUN`/`BIN_DIR`
@@ -237,4 +243,15 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 12. Tracked refactors
 
-Logged as they arise, per house convention. None yet — v1.B is new code.
+Logged as they arise, per house convention.
+
+- **SSRF resolve-then-connect TOCTOU (v1.E).** `crawl/guard.py` resolves each hop
+  and refuses blocked ranges, but httpx then resolves again independently, so a
+  hostile DNS server could answer public to us and private to it. Closing this
+  needs a transport that pins the connection to the address we validated.
+  Deferred because wikimill sends no credentials and reads nothing into a trust
+  boundary, so the residual exposure is a request being made rather than data
+  disclosed — but it is a real gap, not a solved problem.
+- **Provisional recheck cadence (v1.E).** Until v1.F classifies, a crawled URL is
+  marked `unclassified` and rechecked on a flat 7-day cadence. The real, per-state
+  cadences in prd.md §12 land with the classifier.
