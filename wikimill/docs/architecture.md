@@ -2,7 +2,7 @@
 
 How this project is built. Mechanisms, schemas, modules, and integrations. The "HOW" companion to `docs/prd.md`'s "WHY / WHAT".
 
-Status: **v1.B + v1.C shipped** (scaffold, config, storage, preflight, launcher, SQL ingest). Everything below marked *(vN.X)* is planned, not built.
+Status: **v1.B–v1.D shipped** (scaffold, config, storage, preflight, launcher, SQL ingest, normalization). Everything below marked *(vN.X)* is planned, not built.
 
 ## 1. Project layout
 
@@ -30,13 +30,16 @@ wikimill/
 │   │   ├── dump_sql.py        #   streaming MySQL INSERT-tuple scanner
 │   │   ├── eldomain.py        #   el_to_domain_index -> real URL
 │   │   └── msindex.py         #   multistream index (offset:page_id:title)
-│   ├── normalize/             # (v1.D) url.py · domain.py · archive.py
+│   ├── normalize/             # v1.D: stage 2, runs inline inside ingest
+│   │   ├── url.py             #   RFC 3986 + the §10 policy layer
+│   │   ├── domain.py          #   PSL / registrable domain (tldextract)
+│   │   └── archive.py         #   unwrap wayback / archive.today
 │   ├── crawl/                 # (v1.E) fetcher.py · robots.py · politeness.py
 │   ├── classify/              # (v1.F) http.py · parked.py · soft404.py · state.py
 │   ├── domain/                # (v1.G) dns.py · rdap.py
 │   ├── enrich/                # (v1.H) select.py · seek.py · wikitext.py
 │   └── export.py              # (v1.I) scoring + candidate file
-├── tests/                     # 167 tests, hermetic (no network, no Docker)
+├── tests/                     # 232 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -111,7 +114,39 @@ to articles-only via known `Namespace:` prefixes (`--include-namespaces` opts
 out), and `wikimill namespaces` reports the measurement. Only *known* prefixes
 count: "Star Trek: First Contact" is an article. `page.sql.gz` remains unneeded.
 
-## 5. Storage
+## 5. Normalization
+
+Stage 2, running inline inside `ingest` so `url_hash` is the normalized hash
+from the moment a row exists. (A later rewrite pass would have to mutate a
+UNIQUE key and merge the collisions it created.)
+
+**The governing bias: a false merge is worse than a missed one**, because it
+silently attributes one site's liveness to another. So path case, trailing
+slashes, query order, encoded `%2F`, and every ambiguous parameter (`ref`, `id`,
+`source`) are left alone; only unambiguous tracking identifiers are stripped.
+
+- **Archives are unwrapped first** (`web.archive.org`, `archive.today` family),
+  so nothing downstream can normalize a wrapper by mistake. The origin URL is
+  queued, the wrapper kept as `archive_url`. Opaque archives (ghostarchive,
+  webcitation) embed no origin and are recorded as-is rather than guessed at.
+- **The PSL is never fetched at runtime** (`suffix_list_urls=()`). Ingest stays
+  deterministic and a purely local stage makes no surprise network call;
+  refreshing the list is a dependency bump, visible in review.
+- **`NORMALIZER_VERSION` is stamped on every `urls` row.** Changing any rule
+  changes every hash, and the version is what makes that detectable rather than
+  a silent fork of identity.
+
+**`is_private_suffix` is a fact, not a verdict.** It reports that a host sits
+under a PSL private-section suffix. That section holds user-content platforms
+(`blogspot.com`, `github.io`) whose subdomains are never acquireable *and*
+regional/institutional registries (`poznan.pl`, `org.ru`, `ras.ru` — all seen in
+real enwiki data) where one may well be. The PSL cannot separate them, so the
+flag travels to scoring and the export instead of excluding. Hard exclusion is
+reserved for the unambiguous: bare IPs, Wikimedia hosts, identifier resolvers.
+An earlier version called this `is_user_content_suffix` and did exclude — which
+would have silently dropped real finds (migration 2 renames it).
+
+## 6. Storage
 
 SQLite, single file, WAL, at `state/wikimill.db`. Ten tables (schema in `storage/schema.py`, documented in `prd.md` §9).
 
@@ -122,7 +157,7 @@ SQLite, single file, WAL, at `state/wikimill.db`. Ten tables (schema in `storage
 - **Migrations are forward-only** and applied in a single transaction, so a failure leaves the previous version intact rather than a half-migrated database. A database from a *newer* build is refused rather than silently downgraded.
 - **`urls.normalizer_version`** records which ruleset produced each `url_hash`. Changing a normalization rule changes the hash; without this column that would silently fork identity across the table.
 
-## 6. Configuration
+## 7. Configuration
 
 All configuration is environment variables, sourced from a mounted `wikimill.env`. Precedence: **process environment > `wikimill.env` > built-in default.**
 
@@ -139,7 +174,7 @@ The launcher forwards every other host `WIKIMILL_*` variable with `-e` *after* `
 
 **Secrets.** None are needed at v1, but the whole path is built: gitignored `wikimill.env`, committed `.example` with no real values, and redaction of any variable matching `*_KEY|*_TOKEN|*_SECRET|*_PASSWORD` across `preflight`, `--json`, logs, and `crawl_runs.args`. Retrofitting this around a key that has already been committed once is far more expensive.
 
-## 7. Preflight
+## 8. Preflight
 
 A registry of small check functions, each returning a `CheckResult(marker, step, detail, remediation)`. Runs before every state-touching command and aborts on ✗ before any work, network request, or dump read.
 
@@ -152,7 +187,7 @@ Two decisions worth knowing:
 
 Checksums are cached as `(path, size, mtime, sha256)` and re-hashed only when size or mtime changes — verifying 32 GB over USB on every command would otherwise dominate runtime. `--verify-dumps` forces a full re-hash.
 
-## 8. Output contract
+## 9. Output contract
 
 - **Every step ends in exactly one marker**, including boring ones — the consistency is what makes a long log scannable. `✓` succeeded or already-correct · `↷` skipped/transient (retry helps) · `✗` permanent (operator must act).
 - **Markers go to stderr**, so stdout stays clean for `--json` and file output.
@@ -165,7 +200,7 @@ Checksums are cached as `(path, size, mtime, sha256)` and re-hashed only when si
 
 Note: Typer's `no_args_is_help` is deliberately unused — Click implements it by exiting **2**, which would collide with the preflight-failure code. The root callback prints help and exits 0 instead.
 
-## 9. Runtime
+## 10. Runtime
 
 Two paths, one Dockerfile. Crawlers run inside Docker, never on the host; `bin/wikimill` and `bin/install` are the only host-side code, they are bash, and they execute no Python.
 
@@ -185,19 +220,21 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 **Two different dry-runs, deliberately distinguished.** `WIKIMILL_DRY_RUN` is *launcher-level*: print the docker invocation and every mount, start nothing — which is also what makes the launcher testable with no Docker present. `ingest --dry-run` / `enrich --dry-run` are *command-level*: the container starts and reports what work it would do.
 
-## 10. Testing
+## 11. Testing
 
-167 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+232 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness
 - `test_preflight.py` — per-check markers, the gate, "every ✗ names a fix"
 - `test_cli.py` — command surface, exit codes, stubs naming their phase
 - `test_logging.py` — markers, JSONL, stderr/stdout split, colour suppression
+- `test_normalize.py` — canonicalization, archive unwrapping, PSL, filtering
+- `test_eldomain.py` / `test_dump_sql.py` / `test_ingest.py` — v1.C parsers + stage
 - `test_launcher.py` — drives the bash launcher via `WIKIMILL_DRY_RUN` and the installer via `DRY_RUN`/`BIN_DIR`
 
 **Suite-green is not feature-proven.** These verify code correctness. The acceptance criteria that matter (`prd.md` §19) need a real dump and a real crawl.
 
-## 11. Tracked refactors
+## 12. Tracked refactors
 
 Logged as they arise, per house convention. None yet — v1.B is new code.

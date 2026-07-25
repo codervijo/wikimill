@@ -20,18 +20,18 @@ over the same slice inserts nothing and reports `↷ already ingested`.
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Config
-from .constants import RunKind
+from .constants import NORMALIZER_VERSION, RunKind, UrlState
 from .errors import DumpError
 from .logging import RunLog, utcnow
+from .normalize import normalize, url_hash
 from .storage import open_db
 from .wiki import dump_sql, msindex
-from .wiki.eldomain import CRAWLABLE_SCHEMES, ReconstructionError, reconstruct
+from .wiki.eldomain import ReconstructionError, reconstruct
 from .wiki.msindex import PageRange
 
 # `externallinks` column order, verified against the real dump's CREATE TABLE
@@ -41,15 +41,6 @@ EL_ID, EL_FROM, EL_DOMAIN, EL_PATH = 0, 1, 2, 3
 PROGRESS_EVERY = 250_000
 
 
-def raw_url_hash(url: str) -> str:
-    """Identity for a URL as recorded by MediaWiki.
-
-    v1.D replaces this with a hash of the *normalized* URL. `ingest` is cheap to
-    re-run from the dump, so that transition needs no migration — re-ingest.
-    """
-    return hashlib.sha256(url.encode("utf-8")).hexdigest()
-
-
 @dataclass
 class IngestStats:
     pages_indexed: int = 0
@@ -57,12 +48,19 @@ class IngestStats:
     rows_in_slice: int = 0
     links_inserted: int = 0
     links_duplicate: int = 0
+    urls_created: int = 0
+    domains_created: int = 0
+    archives_unwrapped: int = 0
     skipped_scheme: dict[str, int] = field(default_factory=dict)
+    dropped: dict[str, int] = field(default_factory=dict)
     malformed: int = 0
     malformed_examples: list[str] = field(default_factory=list)
 
     def note_scheme(self, scheme: str) -> None:
         self.skipped_scheme[scheme] = self.skipped_scheme.get(scheme, 0) + 1
+
+    def note_dropped(self, reason: str) -> None:
+        self.dropped[reason] = self.dropped.get(reason, 0) + 1
 
     def note_malformed(self, detail: str) -> None:
         self.malformed += 1
@@ -182,9 +180,46 @@ def ingest_links(
     log: RunLog,
     limit: int | None,
 ) -> None:
-    """Stream the SQL dump, keeping only rows whose source page is in the slice."""
+    """Stream the SQL dump, keeping only rows whose source page is in the slice.
+
+    Normalization (stage 2) runs inline here rather than as a later rewrite
+    pass, so `url_hash` is the normalized hash from the moment a row exists.
+    A rewrite pass would have to mutate a UNIQUE key and merge the collisions
+    it created — this avoids the problem instead of solving it.
+    """
     now = utcnow()
     batch: list[tuple] = []
+    domain_ids: dict[str, int] = {}
+
+    def domain_id_for(norm) -> int | None:
+        """Upsert the domain and return its id. Cached per run."""
+        registrable = norm.domain.registrable_domain
+        if not registrable:
+            return None  # bare IP: crawlable, but never an acquisition candidate
+        cached = domain_ids.get(registrable)
+        if cached is not None:
+            return cached
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO domains "
+            "(registrable_domain, public_suffix, is_private_suffix, "
+            " is_resolver, state, first_seen) VALUES (?,?,?,?,?,?)",
+            (
+                registrable,
+                norm.domain.public_suffix,
+                int(norm.domain.is_private_suffix),
+                int(norm.domain.is_resolver),
+                "unknown",
+                now,
+            ),
+        )
+        if cur.rowcount:
+            stats.domains_created += 1
+        row = conn.execute(
+            "SELECT domain_id FROM domains WHERE registrable_domain=?",
+            (registrable,),
+        ).fetchone()
+        domain_ids[registrable] = row["domain_id"]
+        return row["domain_id"]
 
     def flush() -> None:
         if not batch:
@@ -192,14 +227,39 @@ def ingest_links(
         before = conn.total_changes
         conn.executemany(
             "INSERT OR IGNORE INTO external_links "
-            "(page_id, lang, url_raw, url_hash, dump_run, first_seen, last_seen) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "(page_id, lang, url_raw, url_hash, dump_run, first_seen, last_seen, "
+            " archive_url, archive_date) VALUES (?,?,?,?,?,?,?,?,?)",
             batch,
         )
         applied = conn.total_changes - before
         stats.links_inserted += applied
         stats.links_duplicate += len(batch) - applied
         batch.clear()
+
+    seen_urls: set[str] = set()
+
+    def upsert_url(norm) -> None:
+        """Create the queue entry for a normalized URL, once per run."""
+        hashed = url_hash(norm.url)
+        if hashed in seen_urls:
+            return
+        seen_urls.add(hashed)
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO urls "
+            "(url_hash, url_normalized, normalizer_version, domain_id, scheme, "
+            " state, first_seen) VALUES (?,?,?,?,?,?,?)",
+            (
+                hashed,
+                norm.url,
+                NORMALIZER_VERSION,
+                domain_id_for(norm),
+                norm.scheme,
+                UrlState.PENDING,
+                now,
+            ),
+        )
+        if cur.rowcount:
+            stats.urls_created += 1
 
     conn.execute("BEGIN")
     for row in dump_sql.iter_rows(sql_dump):
@@ -228,18 +288,78 @@ def ingest_links(
             continue
         if not rebuilt.crawlable:
             # Recorded as a count, never queued (prd.md §10 rule 10). Real dumps
-            # carry irc/ftp/gopher/telnet/worldwind links.
+            # carry irc/ftp/gopher/telnet/worldwind/mailto/news links.
             stats.note_scheme(rebuilt.scheme)
             continue
+
+        # Stage 2 — normalize inline, so url_hash is the normalized hash from
+        # the moment the row exists.
+        norm = normalize(rebuilt.url)
+        if not norm.keep:
+            stats.note_dropped(str(norm.drop_reason))
+            continue
+        if norm.archive_url:
+            stats.archives_unwrapped += 1
+
+        upsert_url(norm)
         batch.append(
-            (page_id, lang, rebuilt.url, raw_url_hash(rebuilt.url), dump_run, now, now)
+            (
+                page_id,
+                lang,
+                rebuilt.url,          # what MediaWiki recorded
+                url_hash(norm.url),   # identity = hash of the NORMALIZED form
+                dump_run,
+                now,
+                now,
+                norm.archive_url,
+                norm.archive_date,
+            )
         )
         if len(batch) >= 5_000:
             flush()
         if limit is not None and stats.links_inserted + len(batch) >= limit:
             break
     flush()
+    _update_counts(conn)
     conn.execute("COMMIT")
+
+
+def _update_counts(conn: sqlite3.Connection) -> None:
+    """Refresh the denormalized counts `export` and scoring read.
+
+    Recomputed from scratch rather than incremented, so they cannot drift out of
+    step with the tables they summarize across repeated partial runs.
+    """
+    conn.execute(
+        """
+        UPDATE urls SET
+            cite_count = (
+                SELECT COUNT(*) FROM external_links e WHERE e.url_hash = urls.url_hash
+            ),
+            distinct_page_count = (
+                SELECT COUNT(DISTINCT e.page_id) FROM external_links e
+                WHERE e.url_hash = urls.url_hash
+            )
+        """
+    )
+    conn.execute(
+        """
+        UPDATE domains SET
+            url_count = (
+                SELECT COUNT(*) FROM urls u WHERE u.domain_id = domains.domain_id
+            ),
+            wiki_link_count = (
+                SELECT COUNT(*) FROM external_links e
+                JOIN urls u ON u.url_hash = e.url_hash
+                WHERE u.domain_id = domains.domain_id
+            ),
+            wiki_page_count = (
+                SELECT COUNT(DISTINCT e.page_id) FROM external_links e
+                JOIN urls u ON u.url_hash = e.url_hash
+                WHERE u.domain_id = domains.domain_id
+            )
+        """
+    )
 
 
 def run(
@@ -305,6 +425,22 @@ def run(
 
         if stats.links_inserted:
             log.ok("links", f"{stats.links_inserted:,} inserted")
+        if stats.urls_created or stats.domains_created:
+            log.ok(
+                "queue",
+                f"{stats.urls_created:,} URLs · {stats.domains_created:,} domains",
+            )
+        if stats.archives_unwrapped:
+            log.ok(
+                "archives unwrapped",
+                f"{stats.archives_unwrapped:,} (queued the origin, kept the wrapper)",
+            )
+        if stats.dropped:
+            summary = ", ".join(
+                f"{reason}:{count}"
+                for reason, count in sorted(stats.dropped.items(), key=lambda kv: -kv[1])
+            )
+            log.warn("filtered at normalization", summary)
         if stats.links_duplicate:
             log.warn(
                 "links",

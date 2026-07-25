@@ -7,11 +7,11 @@ dependencies = [
     "typer>=0.12",
     "rich>=13",
     "python-dotenv>=1.0",
+    "tldextract>=5.1",  # v1.D — Public Suffix List (bundled snapshot; never fetched)
+    "idna>=3.6",        # v1.D — UTS-46 host encoding (used directly, not transitively)
 ]
 
 # Stage-specific deps land with their phase, not up front:
-#   v1.C  ingest    — (stdlib gzip/bz2; no new dep expected)
-#   v1.D  normalize — tldextract  (Public Suffix List)
 #   v1.E  crawl     — httpx
 #   v1.G  check     — dnspython
 #   v1.H  enrich    — mwparserfromhell

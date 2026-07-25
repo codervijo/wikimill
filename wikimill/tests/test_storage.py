@@ -71,6 +71,14 @@ def test_counts_starts_empty(tmp_path):
         assert all(v == 0 for v in counts(conn).values())
 
 
+def test_private_suffix_column_renamed(tmp_path):
+    """v1.D migration: the old name overclaimed what the PSL can tell us."""
+    with open_db(tmp_path / "w.db") as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(domains)")}
+        assert "is_private_suffix" in cols
+        assert "is_user_content_suffix" not in cols
+
+
 def test_urls_records_normalizer_version(tmp_path):
     """Changing a normalization rule changes url_hash; the version makes that
     detectable instead of silently forking identity across the table."""

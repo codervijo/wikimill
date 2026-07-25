@@ -208,6 +208,17 @@ MIGRATION_1: Final[tuple[str, ...]] = (
     """,
 )
 
-MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (MIGRATION_1,)
+# v1.D. `is_user_content_suffix` overclaimed: it was populated from the PSL's
+# *private* section, which is a superset of user-content platforms. Real data
+# showed it flagging `wbc.poznan.pl`, `spb.org.ru`, `pdmi.ras.ru` — regional and
+# institutional registries, not platforms, and some of them genuinely
+# registrable. The column is renamed to say what it actually measures; whether a
+# private-suffix domain is acquireable is a scoring question (v1.I), not
+# something the PSL can answer.
+MIGRATION_2: Final[tuple[str, ...]] = (
+    "ALTER TABLE domains RENAME COLUMN is_user_content_suffix TO is_private_suffix",
+)
+
+MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (MIGRATION_1, MIGRATION_2)
 
 LATEST_VERSION: Final = len(MIGRATIONS)

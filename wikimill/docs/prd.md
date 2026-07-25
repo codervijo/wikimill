@@ -2,7 +2,7 @@
 
 The canonical source of truth for purpose, scope, phases, and conformance. Code that contradicts this doc is drift, not feature.
 
-> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B` and `v1.C` shipped the same day; `v1.D` is next.
+> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.D` shipped the same day; `v1.E` (the crawler) is next.
 
 ## 1. Purpose
 
@@ -136,7 +136,7 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 | v1.A | ✅ done | Plan: this PRD — cheapest-first ordering, data-source decision, data model, state machine, CLI |
 | v1.B | ✅ done | Scaffold: `pyproject.toml` (uv), `Dockerfile`, `Makefile` + `Makefile.local` (container `wikimill1`), `bin/wikimill` launcher + `bin/install`, `wikimill.env` config/secrets loading + `.example` + gitignore, SQLite schema + migrations, `preflight`, logging/markers |
 | v1.C | ✅ done | SQL ingest: streaming `INSERT`-tuple parser, reversed-domain un-mangling, page-ID slice filter, namespace-filter verification → `wiki_pages` (id+title from the index) + `external_links` (context columns null) |
-| v1.D | ⏳ pending | Normalization + dedup (§10) → `urls` + `domains`; archive-URL unwrapping; scheme / internal-domain / resolver filtering |
+| v1.D | ✅ done | Normalization + dedup (§10) → `urls` + `domains`; archive-URL unwrapping; scheme / internal-domain / resolver filtering |
 | v1.E | ⏳ pending | Crawler: robots-aware, rate-limited, redirect-tracking `httpx` fetcher → append-only `url_checks` |
 | v1.F | ⏳ pending | Classifier: the eleven-state vocabulary (§11) + URL state machine + bounded evidence capture |
 | v1.G | ⏳ pending | Domain checks: multi-resolver DNS + RDAP → `domain_checks` + domain state; `unregistered` established here |
@@ -145,6 +145,16 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 | v1.J | ⏳ pending | First full bounded run + soak; measure everything §19 asks for |
 
 #### Design notes
+
+**v1.D** — ✅ shipped 2026-07-25. Stage 2: `normalize/url.py` (RFC 3986 + the §10 policy layer), `normalize/domain.py` (PSL via `tldextract`), `normalize/archive.py` (archive unwrapping). Normalization runs **inline in `ingest`** rather than as a later rewrite pass, so `url_hash` is the normalized hash from the moment a row exists — a rewrite pass would have had to mutate a UNIQUE key and then merge the collisions it created. Existing databases are re-ingested, not migrated; that was the plan from v1.C.
+
+The governing bias throughout: **a false merge is worse than a missed one**, because it silently attributes one site's liveness to another. So path case, trailing slashes, query order, encoded `%2F`, and every ambiguous parameter (`ref`, `id`, `source`) are left alone; only unambiguous tracking identifiers are stripped. `NORMALIZER_VERSION` is stamped on every `urls` row, because changing any rule changes every hash.
+
+**The PSL is never fetched at runtime** (`suffix_list_urls=()`), keeping ingest deterministic and stopping a purely local stage from making a surprise network call. Refreshing the list is a dependency bump, visible in review.
+
+**A design error caught by real data — `is_user_content_suffix` is now `is_private_suffix` (migration 2).** The PRD assumed the PSL's private section identifies user-content platforms (`blogspot.com`, `github.io`) whose subdomains are never acquireable, and hard-excluded them from candidacy. Real enwiki links showed it also flagging `wbc.poznan.pl`, `spb.org.ru`, `pdmi.ras.ru` — regional and institutional registries, some genuinely registrable. The PSL cannot separate the two. The column now says what it measures, and the flag is carried into scoring and the export rather than silently dropping candidates; hard exclusion is reserved for bare IPs, Wikimedia hosts, and identifier resolvers. §10 rule 3 is corrected accordingly.
+
+**Verified on real data:** 1,075 link rows → 1,051 unique URLs → 808 domains, with `identifier_resolver` filtering firing and the counts (`cite_count`, `distinct_page_count`, `wiki_page_count`) recomputed from scratch each run so they cannot drift. Re-running inserts zero. 232 hermetic tests.
 
 **v1.C** — ✅ shipped 2026-07-25. The ingest stage: `wiki/dump_sql.py` (streaming `INSERT`-tuple scanner), `wiki/eldomain.py` (URL reconstruction), `wiki/msindex.py` (multistream index), `ingest.py` (orchestration), plus `ingest` and `namespaces` on the CLI. Every parsing assumption was **validated against a real 4 MB slice of `enwiki-20260701-externallinks.sql.gz`** rather than inferred — 170,426 real rows, **99.98% reconstructed**; the residue is the literal string `http://...`, which a human typed into an article and which is correctly refused rather than guessed.
 
@@ -284,7 +294,7 @@ Unique: `(page_id, url_hash, dump_run)`.
 `id PK` · `url_hash ✱` · `checked_at ✱` · `http_status` · `final_url` · `final_url_hash` · `redirect_chain` (JSON: per hop — url, status, resolved IP) · `redirect_count` · `cross_domain_redirect` (bool) · `content_type` · `content_length` · `page_title` · `body_sha256` · `evidence_blob` (bounded head of response) · `latency_ms` · `classification` · `classifier_version` · `classifier_reasons` (JSON) · `error_kind` · `error_detail` · `robots_decision` · `crawler_version`
 
 **`domains`** — one row per **registrable domain** (PSL-derived).
-`domain_id PK` · `registrable_domain ✱ UNIQUE` · `public_suffix` · `is_user_content_suffix` (bool — `blogspot.com`, `github.io`, … : a subdomain there is *not* an acquireable asset) · `state ✱` (§11) · `terminal` · `first_seen` · `last_checked` · `next_check_at ✱` · `wiki_page_count` · `wiki_link_count` · `url_count` · `candidate_score` · `score_explanation` (JSON)
+`domain_id PK` · `registrable_domain ✱ UNIQUE` · `public_suffix` · `is_private_suffix` (bool — the host sits under a PSL *private-section* suffix; a **fact, not a verdict**, see §10) · `state ✱` (§11) · `terminal` · `first_seen` · `last_checked` · `next_check_at ✱` · `wiki_page_count` · `wiki_link_count` · `url_count` · `candidate_score` · `score_explanation` (JSON)
 
 **`domain_checks`** — **append-only.**
 `id PK` · `domain_id ✱` · `checked_at ✱` · `dns_status` (`ok` | `nxdomain` | `servfail` | `timeout` | `no_records`) · `a_records` (JSON) · `ns_records` (JSON) · `resolvers_agreed` (bool) · `rdap_status` (`registered` | `not_found` | `unavailable` | `no_rdap_for_tld`) · `rdap_raw` (JSON, bounded) · `registrar` · `registration_expiry` · `domain_statuses` (JSON — EPP codes: `clientHold`, `pendingDelete`, `redemptionPeriod`, …) · `classification` · `classifier_version` · `latency_ms` · `error_kind`
@@ -320,7 +330,7 @@ Unique: `(page_id, url_hash, dump_run)`.
 
 1. `registrable_domain` = eTLD+1 via the **Public Suffix List** (`tldextract`). The PSL is the only defensible definition of "a domain you could own" — naive `last-two-labels` splitting gets `co.uk` and `com.au` wrong.
 2. The full host is stored on the URL; `www.` is **not** stripped for URL identity (it can 404 differently) but *is* irrelevant to domain identity, which uses eTLD+1 only.
-3. Flag `is_user_content_suffix` for PSL entries that are user-content platforms (`blogspot.com`, `github.io`, `wordpress.com`, `tumblr.com`, …). A subdomain there is a page, not an acquireable domain — it must never reach an acquisition export.
+3. Flag `is_private_suffix` when the host sits under a PSL **private-section** suffix — and treat it as a *signal*, not an exclusion. **Corrected at v1.D against real data:** this was originally specified as `is_user_content_suffix`, on the assumption that the private section means user-content platforms (`blogspot.com`, `github.io`) whose subdomains are never acquireable. Real enwiki links showed it also flagging `wbc.poznan.pl`, `spb.org.ru`, and `pdmi.ras.ru` — regional and institutional registries, some of which *are* registrable. The PSL cannot tell the two apart, so the flag is recorded, carried into scoring (v1.I), and shown in the export, rather than silently removing candidates. Hard exclusion is reserved for the unambiguous cases: bare IPs, Wikimedia hosts, and identifier resolvers.
 4. Bare-IP hosts get no registrable domain; they are crawled but never scored as candidates.
 
 ## 11. Crawl-state lifecycle
