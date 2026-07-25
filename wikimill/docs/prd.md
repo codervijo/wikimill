@@ -1,0 +1,633 @@
+# PRD — wikimill
+
+The canonical source of truth for purpose, scope, phases, and conformance. Code that contradicts this doc is drift, not feature.
+
+> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B` shipped the same day; `v1.C` is next.
+
+## 1. Purpose
+
+**wikimill** is a local-first, CLI-first crawler that uses **Wikipedia as a trusted seed source** for finding external websites worth knowing about — and, specifically, for finding the ones that have **died, been abandoned, or become acquireable**.
+
+A link that survived Wikipedia's citation review is a *pre-vetted* signal: someone judged that site authoritative enough to cite in an encyclopedia. When such a domain goes dark, it is simultaneously (a) a broken-citation problem and (b) a high-quality acquisition candidate. wikimill finds both and exports the high-value tail as a candidate file.
+
+**The pipeline is deliberately ordered cheapest-first.** Link *context* (anchor text, section, citation) is expensive to extract and is only ever needed for links that turn out to be interesting. So context extraction is **lazy** — it runs last, on the dead/parked/acquireable subset only:
+
+```
+externallinks SQL dump ─▶ normalize ─▶ URL queue ─▶ HTTP crawl ─▶ classify
+                                                                     │
+                                       ┌── all live? ──▶ done. no further work. ──┐
+                                       ▼                                          │
+                          dead / parked / for-sale / unregistered subset           │
+                                       │                                          │
+                     domain checks (DNS + RDAP) ─▶ candidate set                   │
+                                       │                                          │
+        ◀── ENRICH: seek those pages in the XML multistream dump ──▶               │
+            section · anchor text · citation context                               │
+                                       │                                          │
+                              score ─▶ export (candidate file)  ◀────────────────┘
+```
+
+If a slice contains no dead links, **the extra work is never done.** Enrichment cost is proportional to findings, not to corpus size.
+
+**Internal tool, single operator.** Not a SaaS, not a product, not a search engine.
+
+## 2. Non-goals
+
+**This section is load-bearing.** Update it whenever a tier gets dropped — capture the reason so the next similar proposal gets dropped at scoping, not after implementation.
+
+- **No eager context extraction.** Anchor text / section / citation context is **never** extracted for the whole corpus — only on demand, for links already known to be interesting. Parsing every article's wikitext to harvest context we will discard for the ~majority of links that are alive is precisely the work this design exists to avoid. (Conformance rule.)
+- **No web dashboard / TUI / API in v1.** CLI only. A surface is a later tier and only on operator-felt friction.
+- **No distributed crawler.** Single process, single machine, bounded concurrency. No Redis / Celery / K8s / Spark.
+- **No browser automation.** Pure HTTP (`httpx`). No Playwright, no headless Chrome. Rendering hostile third-party pages is both a security surface (§18) and a scale tax we have no measured need for. If a *specific, named* classification case genuinely requires JS, it gets its own ADR and its own opt-in flag — never a default.
+- **No crawling of Wikipedia itself.** Wikipedia content comes from **dumps**, not from crawling `en.wikipedia.org`. The live API is spot-check only (§6).
+- **No full-Wikipedia ingest in v1, and no crawling of every linked site in v1.** v1 proves the pipeline on a bounded, deterministic page-ID slice. Scale is v3, after v1's numbers are measured.
+- **No generic search-engine infrastructure.** No full-text index, no page-content archive, no link graph beyond what expired-domain discovery needs. We store bounded classification *evidence*, not pages.
+- **No AI / LLM processing in v1.** Extraction and classification are deterministic and auditable. An LLM stage may be introduced later as an **optional, opt-in classifier for the ambiguous residue only** (e.g. soft-404 vs. thin-but-live), never in the hot path, never as the sole basis for a classification. Requires its own ADR + measured evidence that the deterministic classifier plateaued.
+- **No write-back of any kind against any external source.** Read-only: `GET`/`HEAD` only against crawl targets, downloads only against dumps mirrors. No POST, no auth, no form submission, no paywall circumvention. (Conformance rule.)
+- **No domain acquisition, bidding, or registrar automation.** wikimill *finds and reports*. Acquisition is out of scope and is the operator's manual decision.
+- **No WHOIS scraping of registrar web pages.** RDAP is the standardized interface; if a TLD has no RDAP, the status is honestly `unknown` (§11). Never scrape a registrar's HTML to guess.
+- **No fabricated or inferred data.** An unmeasured field is blank or `unknown`, never estimated. Expiry dates, registrars, and availability come from RDAP or nowhere. (Conformance rule.)
+
+## 3. Goals
+
+Concrete, observable, prioritized:
+
+1. `wikimill ingest` turns a bounded slice of the **`externallinks` SQL dump** into a deduplicated URL + domain queue — destination URL, destination domain, and every citing Wikipedia page — **without parsing a single byte of wikitext**.
+2. `wikimill crawl` + `check` classify each URL and domain into the **eleven-state vocabulary** of §11, distinguishing a dead page from a dead domain from a parked domain from an unregistered one.
+3. `wikimill enrich` back-fills **section, anchor text, and citation context** for a *selected subset only*, by seeking directly into the XML multistream dump. On a slice with no dead links, it does nothing and says so.
+4. **Crawl history is append-only.** Every observation is a new row; no prior observation is ever overwritten. "This domain was live in July and NXDOMAIN in October" is a queryable fact, not a lost one.
+5. **Nothing is reprocessed unnecessarily.** A classified record is not re-fetched until its recheck window opens (§12); terminal records are not re-fetched at all without `--force`; an enriched link is never re-enriched from the same dump run.
+6. `wikimill export` produces a **self-contained candidate file** — CSV or JSONL, each row carrying its full Wikipedia evidence chain, readable by a spreadsheet or any downstream consumer.
+7. Operator-grade run: idempotent re-runs, `✓ ✗ ↷` markers with transient/permanent colour coding, live per-step output, a final summary.
+8. **Proof gate:** at least one *verified* unregistered-or-acquireable domain, cited by ≥1 English Wikipedia article, exported with its complete citation evidence.
+
+## 4. Target user
+
+The **operator**, running a local CLI. One user, one machine, no auth, no tenancy.
+
+Two hats, same person:
+
+- *Domain hunter* — wants a short, trustworthy list of acquireable domains that already sit in a credible citation neighbourhood, with enough evidence attached to judge each one without re-researching it.
+- *Link archaeologist* — wants to know which Wikipedia citations are rotten, and what they used to point at.
+
+Success from their seat: run three commands, get a CSV of a few dozen candidates where the top ones are genuinely worth looking at, and never wonder whether a number in it was guessed.
+
+## 5. Primary workflows
+
+**W1 — Seed the queue (cheap).** `preflight` → `ingest --dump <externallinks.sql.gz> --pages p1p41242` → `stats`. Streams the SQL dump, keeps the links whose source page falls in the slice, normalizes, dedupes, and seeds `urls` + `domains`. No wikitext, no context.
+
+**W2 — Crawl the queue.** `crawl --limit N` walks pending URLs oldest-first, respecting robots.txt and per-host politeness, writes one `url_checks` row per attempt, and advances each URL's state. Interruptible and resumable — Ctrl-C loses at most the in-flight batch.
+
+**W3 — Check domains.** `check --limit N` runs DNS + RDAP for domains whose URL-level evidence suggests they may be dead or acquireable, and classifies the domain itself. This is where `unregistered` is established — a fact no HTTP request can establish.
+
+**W4 — Enrich only what matters.** `enrich --state unregistered,for_sale,parked,dns_failure` resolves the citing page IDs for that subset, seeks each one directly in the XML multistream dump, parses only those pages' wikitext, and fills in section / anchor text / citation context. **If the subset is empty, it exits `↷ nothing to enrich` and costs nothing.**
+
+**W5 — Investigate one thing.** `inspect <url|domain>` prints everything known: current state, full check history, every Wikipedia page that cites it (with context if enriched), redirect chain, RDAP snapshot.
+
+**W6 — Harvest candidates.** `export --min-pages 2 --state unregistered,parked,for_sale` writes a CSV/JSONL candidate file with evidence columns.
+
+**W7 — Re-check over time.** Re-run `crawl` / `check` on a cadence the operator chooses; the scheduler (§12) picks only records whose recheck window has opened. Nothing is scheduled automatically — no daemon, no cron in v1.
+
+## 6. Data-source decision
+
+The load-bearing decision of this project. Two questions, answered separately because the lazy-context design decouples them:
+
+**Q — Where does the *link set* come from?** (Needed for every link. Must be cheap.)
+**Q — Where does the *link context* come from?** (Needed for a small subset. May be expensive per item, but must support random access.)
+
+All figures **verified 2026-07-25** against the sources cited in §24.
+
+| Option | Gives us | Costs / limits | Verdict |
+|---|---|---|---|
+| **SQL dump** — `enwiki-<date>-externallinks.sql.gz` (**~4.9 GB**) | The **post-expansion, authoritative link set** — exactly what MediaWiki itself recorded, including links generated by template/module expansion that never appear literally in wikitext. Columns: `el_id, el_from, el_to_domain_index, el_to_path`. Gives destination URL + citing `page_id`, which is all the queue needs. | No anchor text, no section, no citation context. `el_to_domain_index` is a *reversed* domain (`https://org.example.www.`) that must be un-reversed and rejoined with `el_to_path`. (`el_to` / `el_index` / `el_index_60` were removed in MW 1.41.) It is a **MySQL dump** — it must be *parsed*, never executed (§18). | ✅ **Primary — the link set** |
+| **XML multistream + its index** — `pages-articles-multistream.xml.bz2` (~26.6 GB) **and** `pages-articles-multistream-index.txt.bz2` (**~283 MB**) | **Random access to any single page's wikitext.** The index is `offset:page_id:page_title`; each compressed stream holds ~100 pages. Seek to the offset, decompress one small block, get the page. Yields section headings, anchor text, `<ref>` / `{{cite …}}` context, `{{dead link}}` / `{{webarchive}}` tags. The index *also* supplies `page_id → title`, so **`page.sql.gz` (2.4 GB) is not needed**. | Large one-time download of the article dump; wikitext parsing (`mwparserfromhell`). But cost is **per enriched page**, not per corpus. | ✅ **Primary — the context, on demand** |
+| **Wikimedia Action API** — `prop=extlinks`, `list=exturlusage`, `action=parse` | Live per-page data; `exturlusage` answers "who links to this domain?" directly. | Rate-limited: **10 req/min** unidentified, **200 req/min** with a compliant User-Agent; `eulimit` max 500/request. Useless for bulk. | ✅ **Spot-check / verification only** |
+| **Wikimedia Enterprise** — Snapshot API, Structured Contents | Pre-parsed article structure; Structured Contents became free-tier on **2026-07-01**. On-demand fetch of single articles would be an alternative enrichment path. | Requires an account + auth. Free tier: **30 Snapshot requests/month**, **50,000 On-demand requests/month**. Adds a credential and an external dependency for something the local index already does offline. | ↷ **Deferred — re-evaluate at v4** |
+| **Free Enterprise HTML dumps** — `dumps.wikimedia.org/other/enterprise_html/` | Would have been parsed HTML with rendered links. | **Dead.** Last run `20250320`; the mirror states it is *"no longer replicated here"* as of **24 March 2025**. (Regular SQL/XML dumps are current — `20260701` available at verification time.) | ✗ **Rejected — no longer published** |
+| **Common Crawl Wikipedia WARC records** | Wikipedia HTML as crawled by CC. | Strictly worse for this purpose: partial, non-deterministic coverage; staler; needs CDX lookups + ranged WARC reads; *still* needs HTML parsing. Official Wikimedia data is simpler, complete, and free. | ✗ **Rejected for Wikipedia** |
+
+### Recommendation
+
+**SQL dump for the link set; XML multistream + index for lazy context.**
+
+This ordering is better than the context-first alternative on every axis:
+
+- **Cheaper by default** — 4.9 GB streamed once, versus 26.6 GB parsed in full. Most links are alive; their context is never needed and is never extracted.
+- **Better recall, for free** — the SQL table is MediaWiki's own post-expansion record, so template-generated links (e.g. `{{Official website}}` pulling a URL from Wikidata) are included. A wikitext-first pipeline would silently miss them; this one cannot.
+- **Work scales with findings** — enrichment touches ~one 100-page block per citing page in the candidate set, not the corpus.
+- **Nothing is lost** — the multistream index makes the deferred context retrievable at any time, offline, without re-downloading anything.
+
+**Namespace filtering.** `externallinks` has no namespace column. Rather than pull `page.sql.gz` (2.4 GB) just for it, intersect `el_from` with the page-ID set in the multistream index — which covers the article dump's pages. **This must be verified at `v1.C`**; if the intersection turns out not to be a clean article-namespace filter, `page.sql.gz` is the documented fallback. Not assumed — checked.
+
+**v1 sample slice.** One contiguous **page-ID range** matching a single multistream part (e.g. `p1p41242`), applied as an `el_from` filter during SQL ingest. Rationale: a query- or category-based sample systematically biases toward well-maintained topics, which is exactly the opposite of where abandoned assets live. A contiguous page-ID range is unbiased, deterministic, reproducible, and keeps the SQL slice and the enrichment slice trivially aligned.
+
+**Dump-run pinning.** The SQL dump and the XML dump **must be from the same run date**, and the run is recorded on every row. A page revised between two runs would otherwise yield context that does not match the link. `preflight` verifies the two agree.
+
+## 7. Versions / phases
+
+Strict two-level versioning only: `vN` tier, `vN.X` phase. Never three-level. **Phase `.A` of every tier is planning** for that tier; implementation starts at `.B`.
+
+### v1 — Bounded pipeline proof
+
+The whole path on one page-ID slice: SQL link set → normalize → crawl → classify → domain check → **lazy enrich** → export.
+
+| Phase | Status | Title |
+|---|---|---|
+| v1.A | ✅ done | Plan: this PRD — cheapest-first ordering, data-source decision, data model, state machine, CLI |
+| v1.B | ✅ done | Scaffold: `pyproject.toml` (uv), `Dockerfile`, `Makefile` + `Makefile.local` (container `wikimill1`), `bin/wikimill` launcher + `bin/install`, `wikimill.env` config/secrets loading + `.example` + gitignore, SQLite schema + migrations, `preflight`, logging/markers |
+| v1.C | ⏳ pending | SQL ingest: streaming `INSERT`-tuple parser, reversed-domain un-mangling, page-ID slice filter, **namespace-filter verification** → `wiki_pages` (id+title from the index) + `external_links` (context columns null) |
+| v1.D | ⏳ pending | Normalization + dedup (§10) → `urls` + `domains`; archive-URL unwrapping; scheme / internal-domain / resolver filtering |
+| v1.E | ⏳ pending | Crawler: robots-aware, rate-limited, redirect-tracking `httpx` fetcher → append-only `url_checks` |
+| v1.F | ⏳ pending | Classifier: the eleven-state vocabulary (§11) + URL state machine + bounded evidence capture |
+| v1.G | ⏳ pending | Domain checks: multi-resolver DNS + RDAP → `domain_checks` + domain state; `unregistered` established here |
+| v1.H | ⏳ pending | **`enrich`**: multistream index loader → **offset-sorted, block-batched** seek/decompress → `mwparserfromhell` → section, anchor, ref/cite context, dead-link tags, for the selected subset only |
+| v1.I | ⏳ pending | `inspect`, `stats`, scoring, `export` (CSV + JSONL, evidence columns, licence header) |
+| v1.J | ⏳ pending | First full bounded run + soak; measure everything §19 asks for |
+
+#### Design notes
+
+**v1.B** — ✅ shipped 2026-07-25. Scaffold plus the three cross-cutting mechanisms every later phase leans on. Central-builder `Makefile` (container `wikimill1`, not the shared `mb1`) + `Makefile.local`; `Dockerfile` bakes deps and bind-mounts source. **`bin/wikimill`** host launcher (bash, symlink-safe via `readlink -f`, `WIKIMILL_DRY_RUN`, `shell` subcommand) + **`bin/install`** PATH shim. **Config:** `wikimill.env` loading with `process env > file > default` precedence, name-based secret redaction, committed `.example` — built before any credential exists rather than retrofitted around one. **Storage:** the full ten-table schema in one forward-only migration, WAL, append-only check tables, `urls.normalizer_version`. **Preflight:** a check registry — blocking on crawler identity, ↷ on absent dumps (v1.B must run with no 32 GB on disk), dump checksums cached on `(size, mtime)`. **Output:** `✓ ✗ ↷` on stderr, JSONL run log, typed errors carrying remediations. 80 hermetic tests, green inside Docker.
+
+Two decisions were forced during the build, recorded because they are easy to re-break:
+
+1. **Typer's `no_args_is_help` exits 2**, which collides with our own exit-code contract (2 = preflight failure) — `wikimill || handle_preflight_failure` would misfire. The root callback prints help and exits 0 instead.
+2. **The launcher must forward host `WIKIMILL_*` variables with `-e` *after* `--env-file`.** Without it the documented precedence silently fails for every application-layer variable — caught in soak, when an inline `WIKIMILL_CONTACT=…` override stopped at the host and never reached the container.
+
+### v2 — Recheck & coverage
+
+| Phase | Status | Title |
+|---|---|---|
+| v2.A | ⏳ planned | Plan the tier |
+| v2.B | ⏳ planned | Recheck scheduler (§12): `next_check_at`, tiered cadences, `--due` selection, terminal-record protection |
+| v2.C | ⏳ planned | `exturlusage` verification pass before export ("does enwiki still link here?") |
+| v2.D | ⏳ planned | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
+| v2.E | ⏳ planned | Enrichment cache: keep decompressed blocks warm across runs when re-enriching a new dump run |
+
+### v3 — Scale
+
+| Phase | Status | Title |
+|---|---|---|
+| v3.A | ⏳ planned | Plan the tier — informed by v1.J's measured numbers |
+| v3.B | ⏳ planned | Full-enwiki SQL ingest; measure ingest time, DB size, row counts, URL/domain cardinality |
+| v3.C | ⏳ planned | Storage decision point: does SQLite hold, or is Postgres warranted? Evidence-driven, ADR-recorded |
+| v3.D | ⏳ planned | Crawl throughput tuning within the politeness envelope |
+
+### v4+ — candidate tiers (not committed)
+
+Reactive; not scoped until v1–v3 soak.
+
+- **Other language wikis / other Wikimedia projects** (dewiki, frwiki, Wikivoyage — Wikivoyage in particular is dense with small-business external links).
+- **Wikimedia Enterprise** — re-evaluate free-tier Structured Contents as an alternative enrichment path once the local multistream path has soaked and its actual pain is known.
+- **Optional LLM classifier** for the ambiguous residue only (soft-404 vs. thin-but-live, unseen parking templates). Opt-in, off the hot path, own ADR, only after the deterministic classifier demonstrably plateaus.
+- **Watch mode** — a long-running recheck loop. Only if manual re-runs prove annoying.
+
+## 8. Architecture
+
+Six separated concerns, each independently testable, communicating **only through SQLite**. No in-memory pipe between stages — any stage can be re-run without re-running its predecessor.
+
+```
+  ┌─ WIKIPEDIA INGESTION (cheap, whole slice) ─────┐
+  │  wiki/dump_sql.py    stream gz → INSERT tuples │
+  │  wiki/eldomain.py    un-reverse el_to_domain_index + el_to_path
+  │  wiki/msindex.py     multistream index → page_id → (offset, title)
+  └───────────────────┬────────────────────────────┘
+                      ▼  wiki_pages, external_links (context columns NULL)
+  ┌─ NORMALIZATION ────────────────────────────────┐
+  │  normalize/url.py     RFC-3986 canonicalization │
+  │  normalize/domain.py  PSL → registrable domain  │
+  │  normalize/archive.py unwrap web.archive.org/…  │
+  └───────────────────┬────────────────────────────┘
+                      ▼  urls, domains  (the queue)
+  ┌─ URL CRAWLING ─────────┐   ┌─ DOMAIN CHECKS ────────┐
+  │  crawl/fetcher.py      │   │  domain/dns.py         │
+  │  crawl/robots.py       │   │  domain/rdap.py        │
+  │  crawl/politeness.py   │   │                        │
+  └──────────┬─────────────┘   └──────────┬─────────────┘
+             ▼ url_checks                 ▼ domain_checks
+  ┌─ CLASSIFICATION ───────────────────────────────┐
+  │  classify/http.py  · classify/parked.py        │  versioned; re-runnable
+  │  classify/soft404.py · classify/state.py       │  offline over stored evidence
+  └───────────────────┬────────────────────────────┘
+                      ▼  the interesting subset  ── empty? stop here ──▶ ✓ done
+  ┌─ CONTEXT ENRICHMENT (expensive, subset only) ──┐
+  │  enrich/select.py    which pages actually need it
+  │  enrich/seek.py      index offset → bz2 block → page XML
+  │  enrich/wikitext.py  mwparserfromhell → section/anchor/ref
+  └───────────────────┬────────────────────────────┘
+                      ▼  external_links context columns filled
+  ┌─ EXPORT ─ score.py → export.py → outputs/*.csv|jsonl ┐
+  └──────────────────────────────────────────────────────┘
+```
+
+**Two structural decisions carry the design:**
+
+- **Enrichment is a consumer of classification, not a predecessor of it.** This is what makes the work proportional to findings. Every stage before it operates on URLs and page IDs alone.
+- **Classification is a pure function over a stored check row.** Every `url_checks` row keeps its raw evidence plus the `classifier_version` that judged it, so an improved classifier **re-classifies offline** — no re-fetching, no extra load on third-party sites.
+
+### Stage contract
+
+Every stage declares what it reads, what it writes, and **what makes re-running it safe**. Idempotency is not a nice-to-have here: dumps are 32 GB, crawls take hours, drives get unplugged, and Ctrl-C is a normal way to end a run. Every stage must be safe to run again, always.
+
+| # | Stage | Command | Reads | Writes | Idempotency key | Re-run does |
+|---|---|---|---|---|---|---|
+| 0 | acquire | *(out of band)* | dumps mirror | `state/dumps/` | file checksum | nothing — dumps are downloaded once, by hand |
+| 1 | ingest | `ingest` | SQL dump + ms-index | `wiki_pages`, `external_links` | `(page_id, url_hash, dump_run)` | `↷ already ingested`, 0 new rows |
+| 2 | normalize | *(within `ingest`)* | `external_links.url_raw` | `urls`, `domains` | `url_hash` PK / `registrable_domain` UNIQUE | recomputes identical hashes — pure function |
+| 3 | crawl | `crawl` | due `urls` | `url_checks` (append) | `next_check_at > now()` | fetches nothing; `↷ none due` |
+| 4 | classify | *(within `crawl`)* | a `url_checks` row | `classification` on that row | `(check_id, classifier_version)` | same verdict, byte for byte |
+| 5 | check | `check` | due `domains` | `domain_checks` (append) | `next_check_at > now()` | fetches nothing; `↷ none due` |
+| 6 | enrich | `enrich` | candidate subset + XML dump | `external_links` context cols | `(link_id, enrich_dump_run)` | re-parses nothing; `↷ already enriched` |
+| 7 | score | *(within `export`)* | `domains`, `external_links` | `candidate_score` | pure function of current state | same scores |
+| 8 | export | `export` | scored candidates | `outputs/*.csv\|jsonl`, `exports` | `(filter, db state)` → `sha256` | **byte-identical file** |
+
+Three consequences worth naming, because they are what make the table true rather than aspirational:
+
+- **Append-only ≠ non-idempotent.** `crawl` and `check` append a row per *attempt*, so "idempotent" here means *no duplicate work*, not *no new rows*. The recheck window (§12) is the guard; without it, a re-run would hammer every target again.
+- **Export is deterministic.** Ordering is fixed (not `SELECT` insertion order), so the same filter over the same DB state produces a byte-identical file with a matching `sha256`. Two exports a week apart therefore `diff` meaningfully — that *is* the change report, with no separate feature needed.
+- **Normalization is versioned.** `urls.normalizer_version` records which ruleset produced each `url_hash`. Changing a normalization rule changes the hash, which would silently fork identity across the table; the version column makes that detectable and makes a re-normalize migration possible. This is the one stage where "pure function" is only true *per version*.
+
+Stages 2, 4, and 7 have no command of their own — they run inside the stage above them. They are listed because they are independently testable pure functions, which is what makes stages 1, 3, and 8 cheap to trust.
+
+## 9. Data model
+
+SQLite. Tables, with the fields that matter. (`✱` = indexed.)
+
+**`wiki_pages`** — `page_id ✱ PK` · `lang` · `title ✱` · `ms_offset` (byte offset into the multistream archive, from the index) · `dump_run` · `ingested_at`
+Populated from the multistream index at ingest — cheap, and it is what makes `enrich` a seek rather than a scan.
+
+**`external_links`** — one row per link occurrence. **Context columns are `NULL` until `enrich` fills them.**
+`id PK` · `page_id ✱ →wiki_pages` · `url_raw` · `url_hash ✱ →urls` · `dump_run` · `first_seen` · `last_seen`
+— *enrichment-populated:* `section` (nearest preceding `==` heading; `"(lead)"` when none) · `section_level` · `anchor_text` · `link_kind` (`citation` | `external_links_section` | `infobox` | `inline` | `template` | `further_reading`) · `ref_name` · `template_name` (`cite web`, `cite news`, …) · `context_excerpt` (bounded, ~300 chars) · `dead_link_tagged` (bool — Wikipedia's own `{{dead link}}`) · `archive_url` · `archive_date` · `enriched_at` · `enrich_dump_run` · `enrich_status` (`pending` | `done` | `page_missing` | `url_not_found_in_wikitext`)
+Unique: `(page_id, url_hash, dump_run)`.
+
+`enrich_status = url_not_found_in_wikitext` is an expected, honest outcome, not an error: it means the link came from template expansion and has no literal wikitext occurrence. That is *information* — it is recorded, not papered over.
+
+**`urls`** — the crawl queue, one row per normalized URL.
+`url_hash ✱ PK` (SHA-256 hex of the normalized URL) · `url_normalized` · `normalizer_version` · `domain_id ✱ →domains` · `scheme` · `state ✱` (§11) · `terminal` (bool) · `first_seen` · `last_checked` · `next_check_at ✱` · `check_count` · `consecutive_failures` · `cite_count` · `distinct_page_count`
+
+**`url_checks`** — **append-only.** One row per fetch attempt; nothing is ever updated.
+`id PK` · `url_hash ✱` · `checked_at ✱` · `http_status` · `final_url` · `final_url_hash` · `redirect_chain` (JSON: per hop — url, status, resolved IP) · `redirect_count` · `cross_domain_redirect` (bool) · `content_type` · `content_length` · `page_title` · `body_sha256` · `evidence_blob` (bounded head of response) · `latency_ms` · `classification` · `classifier_version` · `classifier_reasons` (JSON) · `error_kind` · `error_detail` · `robots_decision` · `crawler_version`
+
+**`domains`** — one row per **registrable domain** (PSL-derived).
+`domain_id PK` · `registrable_domain ✱ UNIQUE` · `public_suffix` · `is_user_content_suffix` (bool — `blogspot.com`, `github.io`, … : a subdomain there is *not* an acquireable asset) · `state ✱` (§11) · `terminal` · `first_seen` · `last_checked` · `next_check_at ✱` · `wiki_page_count` · `wiki_link_count` · `url_count` · `candidate_score` · `score_explanation` (JSON)
+
+**`domain_checks`** — **append-only.**
+`id PK` · `domain_id ✱` · `checked_at ✱` · `dns_status` (`ok` | `nxdomain` | `servfail` | `timeout` | `no_records`) · `a_records` (JSON) · `ns_records` (JSON) · `resolvers_agreed` (bool) · `rdap_status` (`registered` | `not_found` | `unavailable` | `no_rdap_for_tld`) · `rdap_raw` (JSON, bounded) · `registrar` · `registration_expiry` · `domain_statuses` (JSON — EPP codes: `clientHold`, `pendingDelete`, `redemptionPeriod`, …) · `classification` · `classifier_version` · `latency_ms` · `error_kind`
+
+**`robots_cache`** — `origin PK` · `fetched_at` · `expires_at` · `http_status` · `body` · `crawl_delay`
+
+**`crawl_runs`** — `run_id PK` · `kind` (`ingest`|`crawl`|`check`|`enrich`|`export`) · `started_at` · `ended_at` · `args` (JSON) · `counts` (JSON) · `config_hash` · `crawler_version` · `outcome`
+
+**`exports`** — `export_id PK` · `created_at` · `filter` (JSON) · `row_count` · `path` · `sha256`
+
+**Evidence-blob policy.** Store a bounded head of the response body (default **8 KB**, configurable, decoded to text) for every check whose classification is *not* `live` — exactly the cases where a classifier improvement would change the verdict. `live` pages store only `body_sha256` + title. This keeps offline re-classification possible without turning the DB into a page archive (an explicit non-goal, §2).
+
+## 10. URL and domain normalization rules
+
+**URL normalization** — RFC 3986 canonicalization, then a conservative policy layer. Output is `url_normalized`; `url_hash = sha256(url_normalized)` is the identity key.
+
+1. Lowercase scheme and host. Leave path, query, and fragment case alone (paths are case-sensitive on most servers).
+2. IDN host → **punycode** via UTS-46.
+3. Drop default ports: `:80` on http, `:443` on https.
+4. Resolve dot-segments (`/a/./b/../c` → `/a/c`).
+5. Percent-encoding: uppercase hex digits; decode unreserved characters (`A-Za-z0-9-._~`); leave everything else encoded.
+6. Empty path → `/`. Otherwise **preserve the trailing slash exactly as written** — `/foo` and `/foo/` are different resources to many servers.
+7. **Strip the fragment** (`#…`) — never sent to the server, never affects liveness.
+8. **Strip known tracking parameters** from a maintained list (`utm_*`, `fbclid`, `gclid`, `msclkid`, `mc_cid`, `mc_eid`, `_ga`, …). **Preserve all other parameters in their original order** — do not sort. Sorting is a common "normalization" that silently breaks order-sensitive servers and buys nothing here.
+9. **Unwrap web archives.** `web.archive.org/web/<timestamp>/<url>`, `archive.today` / `archive.ph`, `ghostarchive.org` → extract the wrapped origin URL. Both are recorded: the origin URL is what gets **queued and crawled**; the wrapper is kept as `archive_url`. Crawling the wrapper measures the Internet Archive's health, not the cited domain's.
+10. **Non-crawlable schemes** (`mailto:`, `ftp:`, `irc:`, `news:`, `magnet:`) are recorded as `external_links` rows but never enter the `urls` queue.
+11. **Wikimedia-internal hosts** (`*.wikipedia.org`, `*.wikimedia.org`, `wikidata.org`, `*.wiktionary.org`, …) are filtered out — not "external" for this tool's purpose. Configurable list.
+12. **Identifier resolvers** (`doi.org`, `hdl.handle.net`, `ncbi.nlm.nih.gov/pmc`, `worldcat.org`, …) are flagged `is_resolver` and **excluded from crawl and export by default** — permanently live infrastructure, never acquireable, and they would dominate the queue. Includable with an explicit flag.
+
+**Reconstructing the URL from the SQL dump** — `el_to_domain_index` stores protocol + *reversed* host (`https://org.example.www.`). Un-reverse the dot-separated labels, drop the trailing dot, rejoin with `el_to_path`, then run the rules above. This is a documented gotcha with a dedicated unit-test fixture, because getting it subtly wrong corrupts every domain in the database.
+
+**Domain normalization**
+
+1. `registrable_domain` = eTLD+1 via the **Public Suffix List** (`tldextract`). The PSL is the only defensible definition of "a domain you could own" — naive `last-two-labels` splitting gets `co.uk` and `com.au` wrong.
+2. The full host is stored on the URL; `www.` is **not** stripped for URL identity (it can 404 differently) but *is* irrelevant to domain identity, which uses eTLD+1 only.
+3. Flag `is_user_content_suffix` for PSL entries that are user-content platforms (`blogspot.com`, `github.io`, `wordpress.com`, `tumblr.com`, …). A subdomain there is a page, not an acquireable domain — it must never reach an acquisition export.
+4. Bare-IP hosts get no registrable domain; they are crawled but never scored as candidates.
+
+## 11. Crawl-state lifecycle
+
+Two state machines — URLs and domains — because *a dead page is not a dead domain*, and conflating them is the classic error in this problem space.
+
+### URL states
+
+```
+                 ┌──────────────────────────────────────────┐
+  new ─▶ pending ─▶ in_progress ─┬─▶ <classification>  ──────┴─▶ (recheck when due)
+                                 ├─▶ blocked_by_robots
+                                 └─▶ skipped  (non-crawlable scheme / resolver / out of scope)
+```
+
+`<classification>` is exactly one of the eleven required states:
+
+| Classification | Established by | Terminal? | Triggers enrichment? |
+|---|---|---|---|
+| `live` | 2xx, real content, fails all parked/soft-404 heuristics | no — recheck | **no** |
+| `redirect` | 3xx chain resolving to a final URL. `cross_domain_redirect` distinguishes an in-site move from a domain handover | no — recheck | only if cross-domain |
+| `soft_404` | 2xx but the page says "not found": title/body markers, sub-threshold body length, redirect-to-root of a deep-path URL | no — recheck | yes |
+| `hard_404` | 404 or 410 | after N confirmations | yes |
+| `dns_failure` | Resolution failed. **Sub-kinds recorded, not lumped**: `nxdomain`, `servfail`, `timeout`, `no_records` | no — this is the lead | yes |
+| `tls_failure` | Sub-kinds recorded: `cert_expired`, `hostname_mismatch`, `chain_untrusted`, `protocol_error`, `handshake_timeout` | no | yes |
+| `parked` | Parking-provider signature: known parking nameservers, known parking-page markers, ad-only body | no — high-value, recheck fast | yes |
+| `for_sale` | `parked` **plus** a sale signal (Afternic / Sedo / Dan / "this domain is for sale" markers) | no — highest-value | yes |
+| `unregistered` | **Domain-level only** — confirmed NXDOMAIN across ≥2 resolvers *and* RDAP `not_found`. Never inferred from HTTP alone | **no — recheck fastest** | yes |
+| `temporarily_unavailable` | 5xx, 429, connection reset, read timeout | no — backoff | no |
+| `unclassified` | Fetched, but no rule fired confidently | no — re-classify offline when the classifier improves | no |
+
+The right-hand column **is** the cheapest-first design: enrichment is driven off classification, and the states that dominate a healthy corpus (`live`) drive none of it.
+
+**Two rules that are easy to get wrong, stated explicitly:**
+
+- **`unregistered` is not terminal — it is the most urgent recheck class.** It is the *most* volatile record in the database: someone else can register it tomorrow. "Permanently classified" must never be read as "unregistered".
+- **`hard_404` does not kill the domain.** A 404 says the page is gone; the domain may be perfectly alive. Only `domain_checks` may set a domain state.
+
+**Terminality.** Only these are terminal (never re-fetched without `--force`): `hard_404` confirmed N consecutive times, `skipped`, and operator-set `out_of_scope`. Everything else has a `next_check_at`.
+
+### Domain states
+
+`unknown` → `active` | `parked` | `for_sale` | `expiring` (RDAP expiry within the configured window, or EPP `pendingDelete` / `redemptionPeriod` / `clientHold`) | `unregistered` | `no_rdap_for_tld` (honest gap — the TLD offers no RDAP; we do **not** guess) | `out_of_scope`.
+
+### Enrichment states
+
+Tracked per `external_links` row, not per URL: `pending` → `done` | `page_missing` | `url_not_found_in_wikitext`. An enriched row is **never re-enriched from the same `dump_run`**; a new dump run makes it eligible again.
+
+## 12. Scheduling and recheck strategy
+
+No daemon, no cron, no watch loop in v1. The operator runs `crawl` / `check`; the scheduler decides *what* is due.
+
+Selection is a single ordered query: records where `terminal = 0 AND next_check_at <= now()`, ordered by (candidate value, oldest first), capped by `--limit`. Nothing else is touched.
+
+`next_check_at` is set at classification time from a **configurable** cadence table. These are **policy defaults chosen to reflect volatility and value — not measured figures**; they are expected to be tuned once v1.J produces real data:
+
+| State | Default interval | Rationale |
+|---|---|---|
+| `unregistered` | 3 days | Highest value, most volatile — can be taken by anyone |
+| `for_sale` | 7 days | High value; listings and prices move |
+| `parked` | 7 days | Often a waypoint to expiry |
+| `dns_failure` | 7 days | Could be transient outage or the start of death |
+| `tls_failure` | 14 days | Often neglect — a leading indicator |
+| `soft_404` / `hard_404` | 30 days, ×2 backoff per repeat, capped at 180 | Page-level, low volatility |
+| `live` / `redirect` | 90 days | Healthy; cheap to be patient |
+| `temporarily_unavailable` | 1h, exponential ×2, cap 24h, then re-queue at 7 days | Genuinely transient |
+| `blocked_by_robots` | 180 days | Policy can change, rarely does |
+| `expiring` (domain) | 1 day | The window we actually care about |
+
+`--force` overrides everything, including terminality, and is the only way to re-check a terminal record. Every forced run is logged as such in `crawl_runs`.
+
+## 13. Error handling and retry behavior
+
+**Two categories, matching the operator's colour code** — a failure is classified before it is retried.
+
+**↷ Transient (yellow — retry will help):** DNS timeout, `SERVFAIL`, connection reset/refused, read timeout, TLS handshake timeout, HTTP 429, HTTP 5xx.
+→ Retry within the run: exponential backoff with full jitter, base 2s, **max 3 attempts**, cap 60s. `Retry-After` is honoured exactly when present and overrides the backoff. If all attempts fail, the URL is classified `temporarily_unavailable` and re-queued per §12 — it is **not** marked dead.
+
+**✗ Permanent (red — operator action or a real verdict):** HTTP 404/410, `NXDOMAIN` confirmed by ≥2 independent resolvers, malformed URL, unsupported scheme, robots disallow, response exceeding the size cap.
+→ No in-run retry. Classify and move on.
+
+**Cross-cutting:**
+
+- **Per-host circuit breaker.** After K consecutive transient failures against one host, the *host* is cooled for the rest of the run — the run continues on everything else. One sick server never stalls a crawl.
+- **Single-resolver DNS results are never trusted for `nxdomain`.** A second resolver must agree, and `resolvers_agreed` is recorded. A false NXDOMAIN would produce a fabricated "available domain" — the most expensive possible error for this tool.
+- **RDAP failures are `unavailable`, never `not_found`.** A rate-limited or 500-ing RDAP server means *we don't know*, and `unknown` is written. This is the §2 no-fabrication rule enforced at code level.
+- **Enrichment failures are non-fatal and specific.** A missing page ID, a corrupt block, or a URL with no literal wikitext occurrence sets a distinct `enrich_status` and the run continues — enrichment is auxiliary, and its failure must never abort a candidate export.
+- **Ctrl-C is safe.** Checkpoint after each batch; an interrupted run loses at most the in-flight batch and leaves nothing stuck in `in_progress` (startup reclaims stale rows).
+- **Exit codes:** `0` clean · `1` operator-actionable failure · `2` preflight failure · `130` interrupted.
+
+## 14. Storage recommendations
+
+**SQLite, single file, WAL mode, at `state/wikimill.db`, host-mounted** — the same posture as threadradar.
+
+Rationale: single-writer local tool, zero-ops, transactional, trivially backed up, and `inspect` becomes a plain query. WAL lets `stats` / `inspect` read while a crawl writes.
+
+- **Migrations:** forward-only, numbered, applied at startup. Schema version stored in-DB.
+- **Layout:** `state/wikimill.db` · `state/dumps/` (the SQL dump, the XML multistream archive, and its index — large, gitignored, never committed, downloaded once and reused) · `state/logs/<run_id>.jsonl` · `outputs/` (exports).
+- **The dumps are the cold store.** Deferred context lives in `state/dumps/`, not in the database. This is what keeps the DB proportional to *interesting* data rather than to Wikipedia. Roughly 32 GB total, so the directory is relocatable to any host path via `WIKIMILL_DUMPS_DIR` (§15) without moving the database.
+- **Bounded growth:** the evidence-blob cap (§9) plus null-until-enriched context columns.
+- **Postgres is deferred, not rejected.** Warranted only on *measured* evidence from v3.B — ingest time, DB size, query latency at full-enwiki scale. Guessing that ceiling now would be exactly the speculative-tier mistake. The trigger and the decision get an ADR when the numbers exist.
+- **The row counts of a full enwiki ingest are currently unknown.** They are a v3.B measurement, not an estimate in this document.
+
+## 15. CLI command design
+
+Flat, eight commands, no nested subcommands. Typer, `wikimill <verb>`. Config lives in a `wikimill.toml` file, not in flags — flags are for *this run*, config is for *policy*.
+
+### Invocation — the host launcher
+
+There are two run paths over **one** Dockerfile, following threadradar rather than csi. csi is one-shot (`make buildsh` → `make crawl`); wikimill is eight commands re-invoked over weeks, so requiring a container shell first would grate.
+
+```sh
+./bin/wikimill preflight            # user path: builds (cached) + docker run --rm
+./bin/wikimill crawl --limit 500
+./bin/wikimill shell                # interactive container, for debugging
+./bin/install                       # optional PATH shim → run from any directory
+
+make buildsh                        # dev path: enter the wikimill1 container
+make deps / make test               # uv sync / uv run pytest, inside
+```
+
+**`bin/wikimill`** is a host bash script — the only thing that ever runs outside Docker, and it runs no Python. It builds the image if stale, then `docker run --rm`s `python -m wikimill "$@"`. Deps are baked into the image; **source is bind-mounted**, so code edits need no rebuild. It resolves its own real path (`readlink -f`) before deriving the repo root, so it works through the `bin/install` symlink and always runs the latest source with no reinstall.
+
+Quiet on cached builds; verbose only on first build or `WIKIMILL_REBUILD`.
+
+### Configuration — `wikimill.env`
+
+**All configuration is environment variables, sourced from a mounted `wikimill.env`.** The loader lands at **v1.B**, before anything needs it, so every later addition — an Enterprise token, an RDAP provider key, a proxy — is a one-line drop-in rather than a plumbing exercise.
+
+- `wikimill.env` — real values. **Gitignored** (`*.env` with a `!wikimill.env.example` negation, matching threadradar).
+- `wikimill.env.example` — committed, every variable documented, **no secrets, no real values**.
+- Precedence: real process environment **>** `wikimill.env` **>** built-in default. So a one-off `WIKIMILL_DUMPS_DIR=/mnt/ssd2 ./bin/wikimill enrich` overrides the file without editing it.
+- `preflight` prints the **resolved** value of every variable with secrets redacted, and fails `✗` naming the exact variable when a required one is missing.
+
+The variables split across two layers, and the launcher must handle both:
+
+| Layer | Read by | Variables |
+|---|---|---|
+| **Launcher** (host bash, before Docker) | `bin/wikimill` sources `wikimill.env` itself | `DOCKER_CMD` (default `sudo docker`) · `WIKIMILL_IMAGE` · `WIKIMILL_REBUILD` · `WIKIMILL_DRY_RUN` · `WIKIMILL_DUMPS_DIR` |
+| **Application** (inside the container) | `config.py`, via `--env-file` | `WIKIMILL_USER_AGENT` · `WIKIMILL_CONTACT` · `WIKIMILL_DNS_RESOLVERS` · `WIKIMILL_CONCURRENCY` · *future API keys* |
+
+`WIKIMILL_DUMPS_DIR` is the one that must be read on the **host** — it decides what gets bind-mounted, so it cannot be read from inside the container it configures.
+
+**Two different dry-runs, deliberately distinguished.** `WIKIMILL_DRY_RUN=1` is *launcher-level*: print the `docker run` command — image, every mount, every env var passed — and exit without starting a container. It answers "what would this actually mount?", which matters most when `WIKIMILL_DUMPS_DIR` points somewhere unusual, and it makes the launcher testable with no Docker present. `ingest --dry-run` / `enrich --dry-run` are *command-level*: the container starts and reports what work it *would* do (how many pages, how many blocks) without doing it. Same word, different layers — the PRD and the help text always say which.
+
+**Secrets rules:** never in the repo, never in the database, never in a log line, never in a `crawl_runs.args` blob. `preflight` and `--json` output redact anything whose variable name matches `*_KEY|*_TOKEN|*_SECRET|*_PASSWORD`.
+
+### Dumps on external media
+
+`WIKIMILL_DUMPS_DIR` exists because the three dumps total roughly **32 GB** (~4.9 GB SQL + ~26.6 GB XML + ~283 MB index) — more than many operators want in a repo tree. It points at any host path, and an **external SSD or HDD is an expected deployment**, not an edge case. That has four consequences:
+
+1. **The database never goes on external or removable media.** `state/wikimill.db` stays on local disk; only `state/dumps/` relocates. SQLite in WAL mode relies on POSIX locking and durable `fsync`, and exFAT/NTFS/USB-detach breaks both — the failure mode is a corrupted database, not an error message. This is a hard rule, and `preflight` warns `↷` if the DB path resolves onto the same mount as the dumps.
+2. **An unplugged drive is a clean `✗`, never a mid-run crash.** `preflight` verifies the mount exists, is readable, and holds the expected files *before* any work starts, and prints the resolved path plus the remediation. A drive that vanishes *during* a run surfaces as a permanent error, and the batch checkpoint means resume picks up where it stopped.
+3. **Checksums are cached.** Verifying 32 GB over USB on every command would dominate runtime. `preflight` stores `(path, size, mtime, sha256)` after the first verification and re-hashes only when size or mtime changes; `--verify-dumps` forces a full re-hash.
+4. **Random seek cost is why enrichment batches.** `enrich` does one seek + one block decompress per candidate page. On an SSD that is free; on a spinning HDD, thousands of scattered seeks across a 26.6 GB file is the difference between minutes and hours. So `enrich` **sorts candidate pages by `ms_offset` and groups them by block** — one seek and one decompress serves the ~100 pages that share a stream. This was originally a v2 optimization; an HDD being a first-class target moves it into **v1.H**, since sorting by an already-stored column is nearly free to implement and the worst case without it is severe.
+
+| Command | Purpose | Essential flags |
+|---|---|---|
+| `preflight` | Doctor. Verifies Docker context, both dumps present + checksummed + **same run date**, multistream index readable, DB migrated, DNS/RDAP reachable, User-Agent configured. **Runs before every real command and aborts on `✗`.** | `--json` |
+| `ingest` | SQL dump → URL + domain queue (no context) | `--dump <path>` · `--pages <range>` · `--limit N` · `--dry-run` |
+| `crawl` | Crawl pending/due URLs | `--limit N` · `--concurrency N` · `--force` |
+| `check` | Domain-level DNS + RDAP on due domains | `--limit N` · `--state <list>` · `--force` |
+| `enrich` | Back-fill section / anchor / citation context for a **selected subset** | `--state <list>` · `--limit N` · `--dry-run` |
+| `inspect <url\|domain>` | Everything known about one thing, incl. full history and Wikipedia evidence | `--json` |
+| `export` | Candidates → file | `--state <list>` · `--min-pages N` · `--format csv\|jsonl` · `--out <path>` |
+| `stats` | Counts by state, queue depth, due counts, **un-enriched candidate count**, recent runs | `--json` |
+
+Two departures from the six commands originally sketched, both deliberate:
+
+- **`preflight`** — a mandatory preflight gate is a house conformance rule (threadradar ADR-0008), and this tool has more ways to be misconfigured than most (two dumps that must agree on run date, a 283 MB index, DNS/RDAP reachability).
+- **`enrich`** — the lazy-context stage needs its own verb precisely *because* it is the expensive one. A separate command means the operator explicitly decides when to pay, sees exactly what it will cost (`--dry-run` prints the page count), and gets `↷ nothing to enrich` for free when there is nothing dead. Hiding it inside `export` would bury an expensive operation in a cheap-looking command.
+
+A `config` command is deliberately **not** included yet — there is no configuration complex enough to warrant one. Add it when there is.
+
+Every command that touches state is **idempotent** and prints `✓ / ↷ / ✗` per step, live.
+
+## 16. Observability and logging
+
+- **`✓ ✗ ↷` on every step**, no exceptions for boring steps — consistency is the value.
+- **Colour code:** yellow `↷` = transient / retry-able / skipped-because-already-done; red `✗` = permanent, operator action needed. Categorization is decided at §13, not ad hoc at the print site.
+- **Vicarious output.** `ingest`, `crawl`, and `enrich` print progress as work happens (`flush=True`), never batched into a final summary. A 40-minute run that prints nothing for 40 minutes is a bug.
+- **Cost is always visible before it is paid.** `enrich --dry-run` reports how many pages and how many multistream blocks would be touched. The operator never discovers an expensive stage by watching it run.
+- **Structured run log:** `state/logs/<run_id>.jsonl`, one object per event — machine-greppable, survives the terminal.
+- **Every check row is self-describing:** `crawler_version` + `classifier_version` + `classifier_reasons`. "Why is this marked parked?" is answerable from the DB alone, months later.
+- **Run summary** on every command: counts by outcome, duration, rows written, next-due count.
+- **Error messages name the fix.** A distinct message per failure cause, disambiguated by parsing the actual response — never a bare HTTP status, never a raw stack trace.
+
+## 17. Legal, licensing, robots.txt, and attribution
+
+*Not legal advice; the operator decides what to publish.*
+
+- **Wikipedia text is CC BY-SA 4.0 (dual-licensed GFDL).** Anchor text and `context_excerpt` are **excerpts of CC BY-SA content**. Internal analysis is unencumbered; **any published or redistributed export must attribute and share-alike**. Every export therefore carries a `source_page_url` column and a licence header — so an export is attributable by construction, whatever the operator later does with it. (Wikidata main-namespace structured data and Wikimedia analytics datasets are CC0.)
+  *The lazy design has a pleasant side effect here: CC BY-SA excerpts are only ever stored for the small enriched subset, not for the whole corpus.*
+- **Dumps etiquette.** Download each dump once, keep it in `state/dumps/`, re-read locally. Never re-download per run. Use a mirror where practical. `preflight` verifies the local files rather than re-fetching them.
+- **Wikimedia User-Agent policy.** Any Wikimedia HTTP request (API spot-checks, dump downloads) sends a descriptive UA with contact info, in the documented form: `wikimill/<version> (<contact-url-or-email>) httpx/<ver>`. A generic or absent UA is throttled or blocked.
+- **API rate limits** (verified 2026-07-25): 10 req/min unidentified, 200 req/min with a compliant UA. wikimill stays far under this — the API is spot-check only.
+- **robots.txt on crawl targets is honoured, always.** Fetched per origin, cached with a TTL in `robots_cache`, re-fetched on expiry. A disallowed URL is classified `blocked_by_robots` and **never fetched** — not even once "to check". `Crawl-delay` is honoured where declared; otherwise a default per-host delay applies.
+- **Politeness:** `GET`/`HEAD` only. Per-registrable-domain concurrency of **1**. Bounded global concurrency. `Retry-After` always honoured. The crawler identifies itself honestly and never spoofs a browser UA.
+- **RDAP over WHOIS.** RDAP is the standardized, documented interface with sane terms. Port-43 WHOIS is used **not at all** in v1, and registrar web pages are never scraped (§2).
+- **Ethical posture, stated plainly.** Wikipedia-cited expired domains are attractive to link-spammers, and buying one to launder its citations degrades Wikipedia. This tool exists to find *legitimate* related properties — the bar is clean, acquireable, and genuinely relevant, not merely high-authority. The export carries citation evidence prominently, so any acquisition decision is made with full sight of what the domain was cited *for*.
+
+## 18. Security considerations
+
+The crawler fetches **operator-untrusted URLs harvested from a publicly editable wiki**. Anyone can add a link to Wikipedia. Treat every target as hostile.
+
+- **SSRF defence.** Resolve first, then check: refuse loopback (`127.0.0.0/8`, `::1`), private ranges (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), link-local (`169.254.0.0/16` — including the cloud metadata address `169.254.169.254`), and `0.0.0.0/8`. **Re-check after every redirect hop** — a target that redirects to an internal address is a DNS-rebinding attack, and checking only the first hop is the standard way to get this wrong.
+- **Redirect caps.** Max 5 hops, loop detection, full chain recorded.
+- **Response caps.** Max body size (default 2 MB) and max total request time, both enforced *while streaming* — a hostile server cannot exhaust memory with an endless body.
+- **No execution of fetched content.** No JS, no browser, no PDF/office parsers. HTML is parsed only enough to extract `<title>` and run text heuristics. This is the security half of the no-browser non-goal.
+- **Decompression-bomb guards** on all archive handling: gz and bz2 are **streamed** with an output-size cap and a compression-ratio ceiling. This applies to the 4.9 GB SQL dump, to each seeked multistream block, and to `Content-Encoding: gzip` responses alike. The multistream path is the sharpest case — it decompresses at an operator-influenced byte offset, so a bad offset must fail cleanly rather than consume the machine.
+- **The SQL dump is parsed, never executed.** `externallinks.sql.gz` is a MySQL dump from a public source; piping it into a database engine executes attacker-influenceable SQL. `v1.C` implements a streaming `INSERT`-tuple parser. All of our own DB access is parameterized — no string-built SQL, ever.
+- **Untrusted text stays untrusted.** Page titles, anchor text, and body excerpts are attacker-controlled. They are escaped on output, never interpolated into shell commands, and — if an optional LLM stage ever lands (§2) — must be passed as clearly delimited data with prompt-injection assumed.
+- **Container isolation.** Runs in Docker (operator hard rule), with only `state/` and `outputs/` mounted. No host filesystem beyond that.
+- **Secrets:** v1 needs no credentials, but the **handling is built at v1.B anyway** (§15) — a mounted, gitignored `wikimill.env`, a committed `.example` with no real values, redaction on every output surface, and no secret ever reaching the DB or a log line. Building the safe path before there is anything to leak is cheaper than retrofitting it around a key that has already been committed once.
+
+## 19. Acceptance criteria
+
+v1 is done when all of these are demonstrably true:
+
+1. Runs end-to-end **inside Docker** with no host Python install.
+2. `ingest` on the chosen page-ID slice seeds `urls` + `domains` from the SQL dump **without reading the XML article dump at all** (verifiable: the article archive can be absent and `ingest` still succeeds).
+3. URL reconstruction from `el_to_domain_index` + `el_to_path` is correct on a fixture suite including `www`-prefixed, multi-label, IDN, port-bearing, and path-less cases.
+4. The namespace-filter approach (index intersection vs. `page.sql.gz`) is **verified, not assumed**, and the result is recorded in this PRD.
+5. Re-running `ingest` on the same slice adds **zero** new rows and reports `↷ already ingested`.
+6. Every one of the eleven classifications in §11 is **reachable and exercised** — each has at least one real row, or is documented as not-yet-observed in the sample with a stated reason.
+7. `unregistered` is only ever set with ≥2 resolvers agreeing **and** RDAP `not_found`. No code path exists to set it from HTTP alone.
+8. Archive-wrapped URLs are unwrapped: no queued URL has host `web.archive.org` / `archive.today` / `ghostarchive.org`.
+9. `url_checks` and `domain_checks` are append-only — a second check of the same URL produces a **second row**, and the first is byte-identical to before.
+10. A second `crawl` run immediately after the first fetches **nothing** (everything is within its recheck window) and says so.
+11. `robots.txt` is fetched, cached, and honoured; at least one URL is classified `blocked_by_robots` without ever having been fetched (verifiable from the log).
+12. **`enrich` on a subset with zero dead links exits `↷ nothing to enrich` having opened neither the archive nor the index.** This is the criterion that proves the cheapest-first ordering is real and not just documented.
+13. `enrich` on a real candidate subset produces correct section, anchor text, and citation context for a **manually spot-checked sample of 20**, verified against the live article.
+14. Re-running `enrich` against the same dump run re-parses **nothing**.
+15. `export` produces a file whose every row carries source page URL, domain state, and last-checked timestamp — plus section/anchor/context where enriched — and **no blank field is ever filled with a guess**.
+16. `inspect` on a known domain shows full check history in chronological order.
+17. **Proof gate:** at least one verified acquireable-or-unregistered domain, cited by ≥1 enwiki article, appears in an export with complete evidence — and survives manual verification.
+18. **Every stage in the §8 contract is re-run once in sequence and the second pass is a no-op** — no duplicate rows, no re-fetch, no re-parse, every step reporting `↷`. This is one test, run across the whole pipeline, not per-stage assertions.
+19. `export` run twice against unchanged state produces a **byte-identical file** with a matching `sha256`.
+20. `wikimill.env` is gitignored, `wikimill.env.example` is committed with no real values, and a variable matching `*_KEY|*_TOKEN|*_SECRET|*_PASSWORD` is redacted in `preflight`, `--json` output, logs, and `crawl_runs.args`.
+21. `preflight` fails `✗` with the resolved path and a remediation when `WIKIMILL_DUMPS_DIR` is missing or unmounted, and warns `↷` if the database resolves onto the same mount as the dumps.
+22. `WIKIMILL_DRY_RUN=1 ./bin/wikimill <cmd>` prints the full docker invocation and starts no container — verified with Docker unavailable.
+23. Measured and recorded in v1.J: SQL ingest wall time, rows produced, crawl throughput, **the live/dead ratio of the slice**, enrichment cost per candidate page **on both SSD and HDD dump storage**, DB size, and the classification distribution. *(Measured, not estimated — these are inputs to v3 planning; the live/dead ratio is what tells us how much the lazy ordering actually saved, and the SSD/HDD split is what tells us whether block batching was worth pulling into v1.)*
+
+**Suite-green is not feature-proven.** Tests verify code correctness; criteria 4, 13, 17, and 23 require a real run and operator validation.
+
+## 20. Conformance rules
+
+Violations are bugs, not stylistic preferences.
+
+- **Runs only inside Docker** via the central builder Makefile. No host Python install. (operator hard rule) The single exception is `bin/wikimill` / `bin/install` — host **bash** scripts that execute no Python and exist solely to start the container.
+- **Context extraction is lazy.** No code path parses wikitext for links that have not first been classified as interesting.
+- **Read-only against everything external.** `GET`/`HEAD` only. No write/post/auth-mutation path may exist in the codebase.
+- **robots.txt is honoured unconditionally.** No override flag exists.
+- **No fabricated data.** Unknown is `unknown`; unmeasured is blank. RDAP failure never becomes "available".
+- **Append-only history.** No `UPDATE` on `url_checks` / `domain_checks`, ever.
+- **Dump-run pinning.** SQL and XML dumps must share a run date; every row records it.
+- **No browser.** Pure HTTP client.
+- **`uv`-managed, single lockfile.** No `requirements.txt` / `poetry.lock` / `pip` / bare `python`.
+- **Every stage is idempotent, per the §8 stage contract.** Re-running any command is always safe and never duplicates work; each declares its idempotency key. Every step prints `✓ / ↷ / ✗`, ending in a summary.
+- **Deterministic export.** Fixed ordering, so the same filter over the same state yields a byte-identical file.
+- **All config via environment,** loaded from a mounted `wikimill.env`. No secret in the repo, the DB, or a log.
+- **The database never lives on removable or non-POSIX media.** Dumps may; SQLite may not.
+- **Preflight gates every state-touching command** and aborts on `✗` before any work.
+- **PSL-derived registrable domains.** No naive label-splitting anywhere in the codebase.
+- **Self-contained.** wikimill reads and writes only its own `state/` and `outputs/`. It has no knowledge of, and no dependency on, any sibling project.
+- All canonical doc surfaces match reality and code (spec discipline, below).
+
+## 21. Risks and tradeoffs
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| **Deferred context may be unreachable later.** If the XML dump for the pinned run is deleted from disk or the mirror, enrichment for that run becomes impossible. | Candidates without evidence — the export loses most of its value. | Dumps are kept locally in `state/dumps/`; `preflight` verifies presence and checksum before any run. Wikimedia keeps several runs, but we do not rely on that. |
+| **Dump-run skew.** SQL and XML from different dates → a page revised in between yields context that does not match the link. | Subtly wrong anchor text / section attributed to a link. | Same-run-date pinning enforced by `preflight` and recorded per row (§6, §20). |
+| **`url_not_found_in_wikitext`.** Template-expanded links have no literal wikitext occurrence, so some candidates will never get anchor text. | Some high-value candidates ship with partial evidence. | Recorded as an explicit, honest status — not an error and not silently blank. The link and its citing page are still known; only the surface context is absent. Frequency is measured at v1.J. |
+| **Namespace filtering is unverified.** `externallinks` has no namespace column; the index-intersection approach is a hypothesis. | Non-article pages could pollute the corpus. | Acceptance criterion 4 makes verification a gate, with `page.sql.gz` as the documented fallback. Not assumed. |
+| **Archive-wrapped citations.** A large (unmeasured) share of Wikipedia refs point at `web.archive.org`. | Naive crawling would measure the Internet Archive's uptime instead of the cited domain's — confidently wrong results. | Unwrapping at normalization (§10 rule 9); acceptance criterion 8 enforces it. |
+| **Parked-page detection is heuristic** and drifts as parking providers change templates. | False positives/negatives on the highest-value class. | Versioned classifier + stored evidence → re-classify offline when signatures are updated, with zero re-fetching. |
+| **RDAP coverage is uneven** across TLDs; some ccTLDs offer none. | Some domains can never be confirmed unregistered. | Honest `no_rdap_for_tld` state. Never guessed. Coverage becomes a measured, reportable number. |
+| **False NXDOMAIN → fabricated "available" domain.** | The single most expensive error this tool can make; the operator could act on it. | Two-resolver agreement required *and* RDAP confirmation, both recorded (§13). |
+| **SQLite at full-enwiki scale.** | v3 could stall on write throughput or DB size. | v1/v2 stay bounded; v3.B measures before v3.C decides. No premature Postgres. |
+| **Dump-source fragility.** The free Enterprise HTML mirror already died once (March 2025). | A source we depend on could vanish. | Both primary sources are the plainest, oldest, most stable artifacts Wikimedia publishes. Slices are kept locally, so a mirror outage does not stop work. |
+| **Politeness vs. throughput.** Per-domain concurrency of 1 caps crawl speed. | Large runs take a long time. | Accepted deliberately. Breadth across many domains provides the parallelism; a faster crawler is not worth being a bad citizen. |
+| **Ethical / reputational.** Wikipedia-cited domains attract link-spam acquisition. | Misuse would degrade Wikipedia. | Evidence-forward exports; clean+relevant scoring; no auto-acquisition (§2, §17). |
+
+## 22. Open questions
+
+None of these block approval; each is answerable at its phase. Q1 and Q2 are wanted before `v1.C` starts.
+
+- **Q1 (v1.C) — the v1 page-ID slice.** *Recommendation:* the range covered by one multistream part (e.g. `p1p41242`). Which part, and how large? Operator confirmation wanted.
+- **Q2 (v1.B) — crawler identity.** The exact `WIKIMILL_USER_AGENT` / `WIKIMILL_CONTACT` values. The mechanism is settled (§15 — `wikimill.env`); only the values are outstanding. Operator must supply: this is a public identity, and the Wikimedia UA policy requires real contact info.
+- **Q3 (v1.C) — English only for v1?** *Recommendation: yes* — enwiki only; other wikis are a v4 candidate.
+- **Q4 (v1.F) — evidence-blob default.** Store 8 KB of body for non-`live` checks? Trades disk for offline re-classification. *Recommendation: yes, 8 KB, configurable.*
+- **Q5 (v1.G) — RDAP access strategy.** IANA bootstrap + direct registry RDAP, with what per-registry rate policy? Any TLD needing special handling?
+- **Q6 (v1.H) — enrichment trigger set.** Which classifications should `enrich` default to? *Recommendation:* `unregistered, for_sale, parked, dns_failure, tls_failure, soft_404, hard_404` — i.e. everything except `live`, `redirect` (same-domain), `temporarily_unavailable`, and `unclassified`. Overridable per run.
+- **Q7 (v1.I) — export columns.** What does a candidate row need to carry to be actionable without re-opening the tool? *Recommendation:* domain, state, last-checked, citing-page count, and one representative citation (page URL + section + anchor). Operator to confirm the set.
+- **Q8 (v4) — Wikimedia Enterprise.** Worth an account for free-tier Structured Contents (free since 2026-07-01) as an alternative enrichment path? Only re-evaluate after the local multistream path has soaked.
+
+## 23. Implementation sequence
+
+Post-approval order. Each step lands with its tests and its doc updates in the same commit. Steps 2–8 are each independently runnable and verifiable, because every stage communicates only through the database.
+
+1. **Scaffold** (`v1.B`) — repo shape copied from csi/threadradar: `pyproject.toml` (uv, single lockfile), `Dockerfile`, **`Makefile`** (thin — `BUILDER_PATH ?= ../../builder`, `STACK ?= python`, `CONTAINER_NAME ?= wikimill1`, empty `HOST_PORT`/`CONTAINER_PORT` → `--network=host`, `include $(BUILDER_PATH)/Makefile`) + **`Makefile.local`** (project targets; must not override `run`), `src/wikimill/`, `docs/`, `state/`, `outputs/`, `.gitignore`, `.dockerignore`. **`bin/wikimill` launcher + `bin/install` PATH shim** (§15), symlink-safe, with `WIKIMILL_DUMPS_DIR` mount support and a `WIKIMILL_DRY_RUN` path so the launcher is testable without Docker. **`config.py` env loading + `wikimill.env.example` + gitignore + redaction** — built now, before any secret exists. SQLite schema + forward-only migrations. `preflight` (incl. dump presence, cached checksums, DB-not-on-removable-media check). Logging + `✓ ✗ ↷` markers + typed error hierarchy + exit-code contract.
+2. **SQL ingest** (`v1.C`) — streaming gz → `INSERT`-tuple parser → reversed-domain un-mangling → page-ID slice filter → `external_links` (context null) + `wiki_pages` from the multistream index. **Verify the namespace filter here.** Tests run against a small committed SQL fixture, never a live dump.
+3. **Normalize** (`v1.D`) — URL canonicalization, archive unwrapping, scheme/internal/resolver filtering, PSL domain extraction → `urls` + `domains`. Heavily unit-tested; this is where subtle bugs become wrong answers.
+4. **Crawl** (`v1.E`) — robots cache, per-host politeness, redirect tracking with per-hop SSRF checks, streaming size caps, transient/permanent retry → append-only `url_checks`. Tests hermetic via `httpx.MockTransport`.
+5. **Classify** (`v1.F`) — the eleven-state classifier as a **pure function over a stored check row**, so it is testable offline and re-runnable without network. State machine + `next_check_at`.
+6. **Domain checks** (`v1.G`) — multi-resolver DNS + RDAP → `domain_checks` → domain state. `unregistered` gated behind both signals.
+7. **Enrich** (`v1.H`) — index loader → seek + single-block decompress → `mwparserfromhell` → context columns, for the selected subset only. The empty-subset fast path is written **first**, and tested first — it is the whole point of the ordering.
+8. **Surface** (`v1.I`) — `stats`, `inspect`, scoring, `export` with evidence columns + licence header.
+9. **Soak** (`v1.J`) — first full bounded run; measure §19.18; fix what the real data breaks. Then the queue is open — operator soak-tests, bugs surface, v2 gets scoped from them.
+
+## 24. References
+
+- Project templates: `/home/vijo/work/projects/crawlers/threadradar` (repo shape, Docker/uv/Makefile wiring, preflight, event markers) · `/home/vijo/work/projects/crawlers/csi` (one-shot crawler shape).
+- Central builder: `/home/vijo/work/projects/builder` (Makefile include, `Dockerfile.python`, `Makefile.python`, `dev_container.sh`).
+- Wikimedia dumps: <https://dumps.wikimedia.org/enwiki/> · licence terms <https://dumps.wikimedia.org/legal.html>
+- `externallinks` schema: <https://www.mediawiki.org/wiki/Manual:Externallinks_table>
+- Multistream format + index: <https://en.wikipedia.org/wiki/Wikipedia:Database_download>
+- API: <https://www.mediawiki.org/wiki/API:Exturlusage> · rate limits <https://www.mediawiki.org/wiki/Wikimedia_APIs/Rate_limits>
+- Enterprise HTML dump archive (discontinued mirror): <https://dumps.wikimedia.org/other/enterprise_html/> · Enterprise free tier <https://enterprise.wikimedia.com/blog/enhanced-free-api/>
+- Operator rule reference: `sites/portfolio/docs/for-future-projects.md`.
+
+## Spec discipline
+
+All canonical doc surfaces (this file + `architecture.md` + `shipping-history.md` + any ADRs + `CLAUDE.md`) must match reality and code. Drift is a conformance failure fixed in the same commit as the change that made it stale — not a backlog item.

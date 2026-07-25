@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Install a PATH shim so `wikimill` runs from any directory.
+#
+# Because the launcher bind-mounts live source, the shim always runs the latest
+# code — there is no reinstall step after editing.
+#
+#   ./bin/install
+#
+# Idempotent: re-running repoints an existing symlink and never clobbers a real
+# file. Honours BIN_DIR (default ~/.local/bin) and DRY_RUN.
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+    REAL="$(readlink -f "$SOURCE" 2>/dev/null || echo "$SOURCE")"
+else
+    REAL="$SOURCE"
+fi
+BIN_SRC="$(cd "$(dirname "$REAL")" && pwd)/wikimill"
+BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
+TARGET="$BIN_DIR/wikimill"
+
+ok()   { printf '\033[32m✓\033[0m %s\n' "$1"; }
+warn() { printf '\033[33m↷\033[0m %s\n' "$1"; }
+die()  { printf '\033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
+
+[ -f "$BIN_SRC" ] || die "launcher not found at $BIN_SRC"
+[ -x "$BIN_SRC" ] || chmod +x "$BIN_SRC"
+
+if [ -n "${DRY_RUN:-}" ]; then
+    warn "dry run — would link $TARGET -> $BIN_SRC"
+    exit 0
+fi
+
+mkdir -p "$BIN_DIR"
+
+if [ -L "$TARGET" ]; then
+    current="$(readlink "$TARGET")"
+    if [ "$current" = "$BIN_SRC" ]; then
+        ok "already linked: $TARGET -> $BIN_SRC"
+    else
+        ln -sfn "$BIN_SRC" "$TARGET"
+        ok "repointed: $TARGET -> $BIN_SRC (was $current)"
+    fi
+elif [ -e "$TARGET" ]; then
+    # Never clobber something we did not create.
+    die "$TARGET exists and is not a symlink. Move it aside, then re-run."
+else
+    ln -s "$BIN_SRC" "$TARGET"
+    ok "linked: $TARGET -> $BIN_SRC"
+fi
+
+case ":${PATH}:" in
+    *":$BIN_DIR:"*) ok "$BIN_DIR is on PATH" ;;
+    *) warn "$BIN_DIR is not on PATH — add this to your shell profile:
+    export PATH=\"$BIN_DIR:\$PATH\"" ;;
+esac
+
+ok "run it: wikimill preflight"

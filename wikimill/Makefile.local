@@ -1,0 +1,33 @@
+# Project-specific convenience targets — included last by the central builder.
+# Run these inside `make buildsh` (the wikimill1 container). The user-facing
+# run path is bin/wikimill. We intentionally do NOT override `run` (avoids the
+# builder's "overriding recipe" warning); use `cli`.
+PROJECT_NAME ?= wikimill
+
+.PHONY: cli preflight stats ingest crawl check enrich export
+
+# Launch the CLI (help) inside the dev container.
+cli: deps
+	@uv run wikimill
+
+preflight: deps
+	@uv run wikimill preflight
+
+stats: deps
+	@uv run wikimill stats
+
+# usage: make ingest args="--dump state/dumps/enwiki-...-externallinks.sql.gz"
+ingest: deps
+	@uv run wikimill ingest $(args)
+
+crawl: deps
+	@uv run wikimill crawl $(args)
+
+check: deps
+	@uv run wikimill check $(args)
+
+enrich: deps
+	@uv run wikimill enrich $(args)
+
+export: deps
+	@uv run wikimill export $(args)

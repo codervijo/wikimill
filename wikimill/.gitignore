@@ -1,0 +1,40 @@
+# Session-bridging state — never commit
+docs/handoff.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Env / secrets — the .example is the only env file that may be committed
+.env
+*.env
+!wikimill.env.example
+
+# Host-mounted runtime state (survives container restarts; never committed).
+# state/dumps/ holds ~32 GB of Wikimedia dumps — never let these near git.
+/state/
+/outputs/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+*.log

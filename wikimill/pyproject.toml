@@ -1,0 +1,35 @@
+[project]
+name = "wikimill"
+version = "0.1.0"
+description = "Local-first crawler for Wikipedia external links — dead, parked, and expired-domain discovery."
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+    "python-dotenv>=1.0",
+]
+
+# Stage-specific deps land with their phase, not up front:
+#   v1.C  ingest    — (stdlib gzip/bz2; no new dep expected)
+#   v1.D  normalize — tldextract  (Public Suffix List)
+#   v1.E  crawl     — httpx
+#   v1.G  check     — dnspython
+#   v1.H  enrich    — mwparserfromhell
+
+[project.scripts]
+wikimill = "wikimill.cli:main"
+
+# uv installs dependency-groups by default on `uv sync` (so `make test` works).
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wikimill"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

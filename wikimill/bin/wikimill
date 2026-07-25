@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# wikimill host launcher — the ONLY thing that runs outside Docker, and it runs
+# no Python. Builds the image if stale, then `docker run --rm`s the CLI.
+#
+# Deps are baked into the image; source is bind-mounted, so code edits need no
+# rebuild. Rebuild only matters when pyproject.toml changes.
+#
+#   ./bin/wikimill preflight
+#   ./bin/wikimill stats
+#   ./bin/wikimill shell                 # interactive container (debug)
+#   WIKIMILL_DRY_RUN=1 ./bin/wikimill preflight   # print the command, run nothing
+#
+# Launcher-layer variables are read HERE, on the host, because they decide how
+# the container is built and what is mounted — they cannot be read from inside
+# the container they configure. See docs/architecture.md § Configuration.
+set -euo pipefail
+
+# Resolve our own real path first, so this works through the bin/install
+# symlink (~/.local/bin/wikimill -> this file) and still finds the repo root.
+SOURCE="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+    REAL="$(readlink -f "$SOURCE" 2>/dev/null || echo "$SOURCE")"
+else
+    REAL="$SOURCE"
+fi
+REPO_ROOT="$(cd "$(dirname "$REAL")/.." && pwd)"
+
+ENV_FILE="$REPO_ROOT/wikimill.env"
+
+# Source the env file for launcher-layer variables. Values already present in
+# the real environment win, matching config.py's precedence rule:
+#   process environment > wikimill.env > default
+if [ -f "$ENV_FILE" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in *=*) ;; *) continue ;; esac
+        key="${line%%=*}"; val="${line#*=}"
+        key="$(printf '%s' "$key" | tr -d '[:space:]')"
+        val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
+        case "$key" in
+            DOCKER_CMD|WIKIMILL_IMAGE|WIKIMILL_REBUILD|WIKIMILL_DRY_RUN|WIKIMILL_DUMPS_DIR)
+                if [ -z "${!key:-}" ]; then export "$key=$val"; fi ;;
+        esac
+    done < "$ENV_FILE"
+fi
+
+DOCKER_CMD="${DOCKER_CMD:-sudo docker}"
+IMAGE="${WIKIMILL_IMAGE:-wikimill:latest}"
+DUMPS_DIR="${WIKIMILL_DUMPS_DIR:-$REPO_ROOT/state/dumps}"
+
+die() { printf '\033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
+warn() { printf '\033[33m↷\033[0m %s\n' "$1" >&2; }
+
+# The dumps mount must exist before `docker run`, or Docker creates it as a
+# root-owned empty directory — which then silently looks like "no dumps".
+# An unplugged external drive is a clean failure here, never a mid-run crash.
+if [ -n "${WIKIMILL_DUMPS_DIR:-}" ] && [ ! -d "$DUMPS_DIR" ]; then
+    die "WIKIMILL_DUMPS_DIR does not exist: $DUMPS_DIR
+  → If it is an external drive, check that it is mounted; otherwise create it
+    or correct WIKIMILL_DUMPS_DIR in wikimill.env."
+fi
+mkdir -p "$REPO_ROOT/state" "$REPO_ROOT/outputs" "$DUMPS_DIR" 2>/dev/null || true
+
+# Build if the image is missing or a rebuild was asked for. Quiet on a warm
+# cache; verbose only on first build or WIKIMILL_REBUILD.
+needs_build=0
+if [ -n "${WIKIMILL_REBUILD:-}" ]; then
+    needs_build=1
+elif ! $DOCKER_CMD image inspect "$IMAGE" >/dev/null 2>&1; then
+    needs_build=1
+fi
+
+DOCKER_RUN_ARGS=(
+    run --rm
+    -v "$REPO_ROOT:/usr/src/app"
+    -v "$DUMPS_DIR:/usr/src/app/state/dumps"
+    -e WIKIMILL_IN_DOCKER=1
+    -w /usr/src/app
+)
+[ -f "$ENV_FILE" ] && DOCKER_RUN_ARGS+=(--env-file "$ENV_FILE")
+
+# Forward every WIKIMILL_* variable set in the real environment. Docker applies
+# -e after --env-file, so this preserves the documented precedence:
+#   process environment > wikimill.env > default
+# Without it, `WIKIMILL_CONCURRENCY=2 ./bin/wikimill crawl` would silently do
+# nothing — the variable would never cross into the container.
+while IFS='=' read -r name _; do
+    case "$name" in
+        WIKIMILL_DUMPS_DIR) ;;   # host path — handled by the mount, see below
+        WIKIMILL_*) DOCKER_RUN_ARGS+=(-e "$name=${!name}") ;;
+    esac
+done < <(env | grep '^WIKIMILL_' || true)
+
+# WIKIMILL_DUMPS_DIR is a HOST path; inside the container the mount is always
+# at the default location, so passing the host value through would mislead
+# every path that config.py resolves.
+DOCKER_RUN_ARGS+=(-e WIKIMILL_DUMPS_DIR=)
+[ -t 0 ] && [ -t 1 ] && DOCKER_RUN_ARGS+=(-it)
+
+if [ "${1:-}" = "shell" ]; then
+    shift
+    CMD=(bash)
+else
+    CMD=(python -m wikimill "$@")
+fi
+
+if [ -n "${WIKIMILL_DRY_RUN:-}" ]; then
+    printf '\033[33m↷\033[0m dry run — nothing was executed\n' >&2
+    [ "$needs_build" = "1" ] && printf '  build: %s build -t %s %s\n' \
+        "$DOCKER_CMD" "$IMAGE" "$REPO_ROOT" >&2
+    printf '  run:   %s' "$DOCKER_CMD" >&2
+    printf ' %q' "${DOCKER_RUN_ARGS[@]}" "$IMAGE" "${CMD[@]}" >&2
+    printf '\n  mounts:\n    %s -> /usr/src/app\n    %s -> /usr/src/app/state/dumps\n' \
+        "$REPO_ROOT" "$DUMPS_DIR" >&2
+    exit 0
+fi
+
+command -v "${DOCKER_CMD%% *}" >/dev/null 2>&1 || \
+    die "$DOCKER_CMD not found. Install Docker, or set DOCKER_CMD in wikimill.env."
+
+if [ "$needs_build" = "1" ]; then
+    printf '\033[33m↷\033[0m building %s (first run or WIKIMILL_REBUILD)\n' "$IMAGE" >&2
+    $DOCKER_CMD build -t "$IMAGE" "$REPO_ROOT" >&2
+fi
+
+exec $DOCKER_CMD "${DOCKER_RUN_ARGS[@]}" "$IMAGE" "${CMD[@]}"
