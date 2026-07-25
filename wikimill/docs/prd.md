@@ -2,7 +2,7 @@
 
 The canonical source of truth for purpose, scope, phases, and conformance. Code that contradicts this doc is drift, not feature.
 
-> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B` shipped the same day; `v1.C` is next.
+> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B` and `v1.C` shipped the same day; `v1.D` is next.
 
 ## 1. Purpose
 
@@ -135,7 +135,7 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 |---|---|---|
 | v1.A | ✅ done | Plan: this PRD — cheapest-first ordering, data-source decision, data model, state machine, CLI |
 | v1.B | ✅ done | Scaffold: `pyproject.toml` (uv), `Dockerfile`, `Makefile` + `Makefile.local` (container `wikimill1`), `bin/wikimill` launcher + `bin/install`, `wikimill.env` config/secrets loading + `.example` + gitignore, SQLite schema + migrations, `preflight`, logging/markers |
-| v1.C | ⏳ pending | SQL ingest: streaming `INSERT`-tuple parser, reversed-domain un-mangling, page-ID slice filter, **namespace-filter verification** → `wiki_pages` (id+title from the index) + `external_links` (context columns null) |
+| v1.C | ✅ done | SQL ingest: streaming `INSERT`-tuple parser, reversed-domain un-mangling, page-ID slice filter, namespace-filter verification → `wiki_pages` (id+title from the index) + `external_links` (context columns null) |
 | v1.D | ⏳ pending | Normalization + dedup (§10) → `urls` + `domains`; archive-URL unwrapping; scheme / internal-domain / resolver filtering |
 | v1.E | ⏳ pending | Crawler: robots-aware, rate-limited, redirect-tracking `httpx` fetcher → append-only `url_checks` |
 | v1.F | ⏳ pending | Classifier: the eleven-state vocabulary (§11) + URL state machine + bounded evidence capture |
@@ -145,6 +145,21 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 | v1.J | ⏳ pending | First full bounded run + soak; measure everything §19 asks for |
 
 #### Design notes
+
+**v1.C** — ✅ shipped 2026-07-25. The ingest stage: `wiki/dump_sql.py` (streaming `INSERT`-tuple scanner), `wiki/eldomain.py` (URL reconstruction), `wiki/msindex.py` (multistream index), `ingest.py` (orchestration), plus `ingest` and `namespaces` on the CLI. Every parsing assumption was **validated against a real 4 MB slice of `enwiki-20260701-externallinks.sql.gz`** rather than inferred — 170,426 real rows, **99.98% reconstructed**; the residue is the literal string `http://...`, which a human typed into an article and which is correctly refused rather than guessed.
+
+Four things real data taught us, each of which would otherwise have shipped as a silent corruption:
+
+1. **IP hosts are not reversed.** They carry a `V4.`/`V6.` marker and appear in normal order — `http://V4.66.102.9.104.` is `66.102.9.104`, not `104.9.102.66`. 482 in the sample.
+2. **Ports follow the trailing dot** — `http://uk.co.linearb.:8080` → `linearb.co.uk:8080`. 223 in the sample. Splitting the port after reversing produces nonsense.
+3. **Values contain backslash-escaped quotes** (`/wiki/Stating_the_bleedin\'_obvious`), and statements are **~1 MB lines** holding thousands of tuples. Splitting on `'` corrupts data; a naive regex backtracks. Hence a hand-written character scanner.
+4. **Opaque schemes exist.** `mailto:`/`news:` are written `scheme:` with no `//` (269 in the sample). They are a known non-crawlable category, so they parse into an opaque result and are *counted*; classing them as malformed would have inflated the error count and hidden real parse failures.
+
+**Namespace filtering — hypothesis tested, and it failed.** §6 proposed intersecting `el_from` with the multistream index instead of pulling `page.sql.gz` (2.4 GB). Measured on the real `20260701` index for slice `p1p41242`: **99.27% articles** — the article dump also carries `Wikipedia:`, `Portal:`, `Help:`, and `Draft:` pages (201 of 27,353). So intersection is a good proxy but **not** a clean namespace filter. Resolution: ingest defaults to articles-only using known `Namespace:` prefixes, with `--include-namespaces` to opt out, and a `namespaces` command that reports the measurement. Only *known* prefixes count — "Star Trek: First Contact" is an article, and dropping colon-bearing titles would silently lose encyclopedic pages. `page.sql.gz` stays unneeded.
+
+**Verified end to end on real data:** 27,152 article pages and 1,082 links ingested from the real dump; re-running inserts zero and reports `↷ already ingested`; context columns are all NULL (no wikitext read, the whole point of the ordering). 167 hermetic tests.
+
+Two soak fixes to the v1.B launcher: it now runs as the invoking user (`-u`), because container-written `state/` was landing **root-owned on the host** and the operator could not delete their own database without sudo; and the dumps mount is now **read-only**, so an accidental write is a clear error rather than a corrupted 26 GB archive. The database open error also now distinguishes a permissions failure from an external-media failure — it previously sent the operator to the wrong remedy.
 
 **v1.B** — ✅ shipped 2026-07-25. Scaffold plus the three cross-cutting mechanisms every later phase leans on. Central-builder `Makefile` (container `wikimill1`, not the shared `mb1`) + `Makefile.local`; `Dockerfile` bakes deps and bind-mounts source. **`bin/wikimill`** host launcher (bash, symlink-safe via `readlink -f`, `WIKIMILL_DRY_RUN`, `shell` subcommand) + **`bin/install`** PATH shim. **Config:** `wikimill.env` loading with `process env > file > default` precedence, name-based secret redaction, committed `.example` — built before any credential exists rather than retrofitted around one. **Storage:** the full ten-table schema in one forward-only migration, WAL, append-only check tables, `urls.normalizer_version`. **Preflight:** a check registry — blocking on crawler identity, ↷ on absent dumps (v1.B must run with no 32 GB on disk), dump checksums cached on `(size, mtime)`. **Output:** `✓ ✗ ↷` on stderr, JSONL run log, typed errors carrying remediations. 80 hermetic tests, green inside Docker.
 

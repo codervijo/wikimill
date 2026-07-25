@@ -9,6 +9,7 @@ and durable fsync; the failure mode is a corrupted database, not an error).
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -41,14 +42,28 @@ def connect(db_path: Path, *, create: bool = True) -> sqlite3.Connection:
     try:
         conn = sqlite3.connect(db_path, isolation_level=None)
     except sqlite3.Error as exc:
-        raise StorageError(
-            f"Cannot open database {db_path}: {exc}",
-            remediation=(
+        # One SQLite error covers several very different causes; a generic
+        # message sends the operator to the wrong remedy, so disambiguate.
+        parent = db_path.parent
+        if parent.exists() and not os.access(parent, os.W_OK):
+            import pwd
+
+            try:
+                owner = pwd.getpwuid(parent.stat().st_uid).pw_name
+            except (KeyError, OSError):
+                owner = str(parent.stat().st_uid)
+            remediation = (
+                f"{parent} is not writable by this user (owned by {owner}). "
+                "If it was created by an older root-run container, reclaim it: "
+                f"sudo chown -R $(id -u):$(id -g) {parent}"
+            )
+        else:
+            remediation = (
                 "If this path is on an external or network drive, move it to "
                 "local disk — SQLite WAL requires POSIX locking and a durable "
                 "fsync. Only state/dumps/ may live on external media."
-            ),
-        ) from exc
+            )
+        raise StorageError(f"Cannot open database {db_path}: {exc}", remediation=remediation) from exc
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")

@@ -17,6 +17,7 @@ EXPECTED_COMMANDS = {
     "preflight",
     "stats",
     "ingest",
+    "namespaces",
     "crawl",
     "check",
     "enrich",
@@ -91,7 +92,6 @@ def test_stats_json():
 @pytest.mark.parametrize(
     ("command", "phase"),
     [
-        (["ingest"], "v1.C"),
         (["crawl"], "v1.E"),
         (["check"], "v1.G"),
         (["enrich"], "v1.H"),

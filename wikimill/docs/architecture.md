@@ -2,7 +2,7 @@
 
 How this project is built. Mechanisms, schemas, modules, and integrations. The "HOW" companion to `docs/prd.md`'s "WHY / WHAT".
 
-Status: **v1.B shipped** (scaffold, config, storage, preflight, launcher). Everything below marked *(vN.X)* is planned, not built.
+Status: **v1.B + v1.C shipped** (scaffold, config, storage, preflight, launcher, SQL ingest). Everything below marked *(vN.X)* is planned, not built.
 
 ## 1. Project layout
 
@@ -16,7 +16,7 @@ wikimill/
 ├── wikimill.env.example       # every variable documented — no secrets
 ├── main.py                    # root entry so the builder's `make run` works
 ├── src/wikimill/
-│   ├── cli.py                 # Typer app — the 8 commands
+│   ├── cli.py                 # Typer app — the 9 commands
 │   ├── config.py              # env loading, precedence, redaction
 │   ├── constants.py           # canonical enums/versions/defaults
 │   ├── errors.py              # typed errors + exit-code contract
@@ -25,14 +25,18 @@ wikimill/
 │   ├── storage/
 │   │   ├── db.py              # connection, WAL, migration runner
 │   │   └── schema.py          # forward-only migrations
-│   ├── wiki/                  # (v1.C) dump_sql.py · eldomain.py · msindex.py
+│   ├── ingest.py              # v1.C: stage 1 orchestration
+│   ├── wiki/                  # v1.C: dump readers + URL reconstruction
+│   │   ├── dump_sql.py        #   streaming MySQL INSERT-tuple scanner
+│   │   ├── eldomain.py        #   el_to_domain_index -> real URL
+│   │   └── msindex.py         #   multistream index (offset:page_id:title)
 │   ├── normalize/             # (v1.D) url.py · domain.py · archive.py
 │   ├── crawl/                 # (v1.E) fetcher.py · robots.py · politeness.py
 │   ├── classify/              # (v1.F) http.py · parked.py · soft404.py · state.py
 │   ├── domain/                # (v1.G) dns.py · rdap.py
 │   ├── enrich/                # (v1.H) select.py · seek.py · wikitext.py
 │   └── export.py              # (v1.I) scoring + candidate file
-├── tests/                     # 80 tests, hermetic (no network, no Docker)
+├── tests/                     # 167 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -76,7 +80,38 @@ Two consequences:
 - The index also supplies `page_id → title`, so **`page.sql.gz` (2.4 GB) is not needed at all**.
 - `enrich` **sorts candidates by `ms_offset` and batches by block**, so one seek and one decompress serves every candidate sharing a stream. On an SSD this is a minor win; on a spinning external HDD — an expected deployment — it is the difference between minutes and hours.
 
-## 4. Storage
+## 4. Reading the externallinks dump
+
+Everything here was validated against a real 4 MB slice of
+`enwiki-20260701-externallinks.sql.gz` (170,426 rows, **99.98% reconstructed**),
+not inferred. Four properties of the real file drive the implementation:
+
+- **IP hosts are not reversed.** A `V4.`/`V6.` marker precedes them and the
+  octets are in normal order: `http://V4.66.102.9.104.` is `66.102.9.104`.
+  Reversing it would corrupt every IP host.
+- **The port follows the trailing dot**: `http://uk.co.linearb.:8080` →
+  `linearb.co.uk:8080`. It must be split *before* labels are reversed.
+- **Statements are ~1 MB lines** of thousands of tuples, and values carry
+  backslash-escaped quotes. Splitting on `'` corrupts data and a naive regex
+  backtracks, so `dump_sql.py` is a hand-written character scanner.
+- **Opaque schemes exist**: `mailto:`/`news:` are written `scheme:` with no
+  `//`. They parse into an opaque, non-crawlable result and are *counted* —
+  treating them as malformed would hide real parse failures behind noise.
+
+**The dump is parsed, never executed** — it is a MySQL dump from a publicly
+editable source, so feeding it to a database engine would execute
+attacker-influenceable SQL.
+
+**Namespace filtering — measured, not assumed.** `externallinks` has no
+namespace column, so ingest intersects `el_from` with the index's page IDs.
+Measured on the real `20260701` index (slice `p1p41242`): **99.27% articles** —
+the article dump also carries `Wikipedia:`/`Portal:`/`Help:`/`Draft:` pages. So
+intersection is a good proxy but not a clean filter. Ingest therefore defaults
+to articles-only via known `Namespace:` prefixes (`--include-namespaces` opts
+out), and `wikimill namespaces` reports the measurement. Only *known* prefixes
+count: "Star Trek: First Contact" is an article. `page.sql.gz` remains unneeded.
+
+## 5. Storage
 
 SQLite, single file, WAL, at `state/wikimill.db`. Ten tables (schema in `storage/schema.py`, documented in `prd.md` §9).
 
@@ -87,7 +122,7 @@ SQLite, single file, WAL, at `state/wikimill.db`. Ten tables (schema in `storage
 - **Migrations are forward-only** and applied in a single transaction, so a failure leaves the previous version intact rather than a half-migrated database. A database from a *newer* build is refused rather than silently downgraded.
 - **`urls.normalizer_version`** records which ruleset produced each `url_hash`. Changing a normalization rule changes the hash; without this column that would silently fork identity across the table.
 
-## 5. Configuration
+## 6. Configuration
 
 All configuration is environment variables, sourced from a mounted `wikimill.env`. Precedence: **process environment > `wikimill.env` > built-in default.**
 
@@ -104,7 +139,7 @@ The launcher forwards every other host `WIKIMILL_*` variable with `-e` *after* `
 
 **Secrets.** None are needed at v1, but the whole path is built: gitignored `wikimill.env`, committed `.example` with no real values, and redaction of any variable matching `*_KEY|*_TOKEN|*_SECRET|*_PASSWORD` across `preflight`, `--json`, logs, and `crawl_runs.args`. Retrofitting this around a key that has already been committed once is far more expensive.
 
-## 6. Preflight
+## 7. Preflight
 
 A registry of small check functions, each returning a `CheckResult(marker, step, detail, remediation)`. Runs before every state-touching command and aborts on ✗ before any work, network request, or dump read.
 
@@ -117,7 +152,7 @@ Two decisions worth knowing:
 
 Checksums are cached as `(path, size, mtime, sha256)` and re-hashed only when size or mtime changes — verifying 32 GB over USB on every command would otherwise dominate runtime. `--verify-dumps` forces a full re-hash.
 
-## 7. Output contract
+## 8. Output contract
 
 - **Every step ends in exactly one marker**, including boring ones — the consistency is what makes a long log scannable. `✓` succeeded or already-correct · `↷` skipped/transient (retry helps) · `✗` permanent (operator must act).
 - **Markers go to stderr**, so stdout stays clean for `--json` and file output.
@@ -130,7 +165,7 @@ Checksums are cached as `(path, size, mtime, sha256)` and re-hashed only when si
 
 Note: Typer's `no_args_is_help` is deliberately unused — Click implements it by exiting **2**, which would collide with the preflight-failure code. The root callback prints help and exits 0 instead.
 
-## 8. Runtime
+## 9. Runtime
 
 Two paths, one Dockerfile. Crawlers run inside Docker, never on the host; `bin/wikimill` and `bin/install` are the only host-side code, they are bash, and they execute no Python.
 
@@ -150,9 +185,9 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 **Two different dry-runs, deliberately distinguished.** `WIKIMILL_DRY_RUN` is *launcher-level*: print the docker invocation and every mount, start nothing — which is also what makes the launcher testable with no Docker present. `ingest --dry-run` / `enrich --dry-run` are *command-level*: the container starts and reports what work it would do.
 
-## 9. Testing
+## 10. Testing
 
-80 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+167 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness
@@ -163,6 +198,6 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 **Suite-green is not feature-proven.** These verify code correctness. The acceptance criteria that matter (`prd.md` §19) need a real dump and a real crawl.
 
-## 10. Tracked refactors
+## 11. Tracked refactors
 
 Logged as they arise, per house convention. None yet — v1.B is new code.

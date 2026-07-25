@@ -16,10 +16,12 @@ from typing import Annotated
 import typer
 
 from . import __version__
+from . import ingest as ingest_stage
 from .config import load as load_config
 from .constants import EXIT_INTERRUPTED, EXIT_OK, RunKind
 from .errors import Interrupted, NotImplementedYetError, WikimillError
 from .logging import RunLog
+from .wiki import msindex
 from .preflight import gate, run_checks, verify_dumps
 from .preflight import preflight as run_preflight
 from .storage import counts, open_db, user_version
@@ -137,7 +139,9 @@ def stats(
 @app.command()
 def ingest(
     dump: Annotated[
-        str | None, typer.Option("--dump", help="Path to the externallinks SQL dump.")
+        str | None,
+        typer.Option("--dump", help="Path to the externallinks SQL dump. "
+                                    "Auto-discovered in the dumps dir if omitted."),
     ] = None,
     pages: Annotated[
         str | None,
@@ -149,9 +153,65 @@ def ingest(
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Report what would be ingested.")
     ] = False,
+    include_namespaces: Annotated[
+        bool,
+        typer.Option(
+            "--include-namespaces",
+            help="Also ingest Wikipedia:/Portal:/Help:/Draft: pages "
+                 "(default: articles only).",
+        ),
+    ] = False,
 ) -> None:
-    """Seed the URL + domain queue from the externallinks SQL dump."""
-    raise NotImplementedYetError("ingest", "v1.C")
+    """Seed the link table from the externallinks SQL dump (no wikitext read)."""
+    cfg = load_config()
+    with RunLog(RunKind.INGEST, cfg.logs_dir) as log:
+        gate(cfg, log)
+        ingest_stage.run(
+            cfg,
+            log,
+            dump=dump,
+            pages=pages,
+            limit=limit,
+            dry_run=dry_run,
+            include_namespaces=include_namespaces,
+        )
+
+
+@app.command()
+def namespaces(
+    pages: Annotated[
+        str | None, typer.Option("--pages", help="Restrict to a page-ID slice.")
+    ] = None,
+    sample: Annotated[
+        int, typer.Option("--sample", help="How many index entries to sample.")
+    ] = 200_000,
+    json_out: Annotated[bool, typer.Option("--json", help="Emit as JSON.")] = False,
+) -> None:
+    """Measure whether the multistream index is a clean article-namespace filter.
+
+    `externallinks` has no namespace column, so ingest intersects `el_from` with
+    the index's page IDs. That this filters to articles is a hypothesis; this
+    command is the evidence for it (acceptance criterion 4).
+    """
+    cfg = load_config()
+    with RunLog(RunKind.INGEST, cfg.logs_dir, quiet=json_out) as log:
+        gate(cfg, log)
+        files = msindex.find_index_files(cfg.dumps_dir)
+        page_range = msindex.parse_page_range(pages) if pages else None
+        report = msindex.namespace_report(
+            msindex.iter_range(files, page_range), sample=sample
+        )
+    if json_out:
+        typer.echo(jsonlib.dumps(report, indent=2))
+        return
+    typer.echo(f"sampled {report['sampled']:,} index entries")
+    typer.echo(f"article fraction: {report['article_fraction']:.4%}")
+    if report["by_namespace"]:
+        typer.echo("non-article namespaces found:")
+        for ns, count in report["by_namespace"].items():
+            typer.echo(f"  {ns:<20} {count:>8,}   e.g. {report['examples'][ns]}")
+    else:
+        typer.echo("no non-article namespace prefixes found in the sample")
 
 
 @app.command()

@@ -72,8 +72,16 @@ fi
 
 DOCKER_RUN_ARGS=(
     run --rm
+    # Run as the invoking user so state/, outputs/, and logs are owned by them
+    # on the host. Without this, everything the container writes lands as root
+    # and the operator cannot inspect or delete their own database without sudo.
+    -u "$(id -u):$(id -g)"
+    -e HOME=/tmp
     -v "$REPO_ROOT:/usr/src/app"
-    -v "$DUMPS_DIR:/usr/src/app/state/dumps"
+    # Dumps are read-only: nothing in the pipeline ever writes to them, and a
+    # read-only mount makes an accidental write a clear error rather than a
+    # corrupted 26 GB archive.
+    -v "$DUMPS_DIR:/usr/src/app/state/dumps:ro"
     -e WIKIMILL_IN_DOCKER=1
     -w /usr/src/app
 )
