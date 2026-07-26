@@ -148,11 +148,26 @@ class RunLog:
         )
 
     def progress(self, message: str) -> None:
-        """A transient progress line, so long stages are never silent."""
+        """A transient progress line, so long stages are never silent.
+
+        Written to the JSONL log as well as the terminal. Terminal output is
+        transient — piped, buffered, or scrolled away — and the durable log
+        being silent during the *long* part of a run is precisely when it
+        matters most: it is the only way to tell a working crawl from a hung
+        one without attaching a debugger.
+        """
         if not self.quiet:
             print(f"  {_DIM if self._colour else ''}{message}"
                   f"{_RESET if self._colour else ''}",
                   file=self._stream, flush=True)
+        self._write(
+            {
+                "ts": utcnow(),
+                "run_id": self.run_id,
+                "kind": self.kind,
+                "progress": message,
+            }
+        )
 
     # -- lifecycle ---------------------------------------------------------
 

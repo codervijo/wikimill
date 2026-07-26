@@ -31,21 +31,28 @@ BOOTSTRAP_FILENAME = "rdap-bootstrap.json"
 BOOTSTRAP_TTL_SECS = 7 * 86_400
 MAX_RDAP_BYTES = 512 * 1024
 
-# EPP status codes that mean the registration is winding down. Their presence is
-# the earliest reliable warning that a domain may become available.
+# EPP status codes that mean the registration is genuinely winding down. Their
+# presence is the earliest *reliable* warning that a domain may become available.
+#
+# Two exclusions matter more than the inclusions, both corrected after real data
+# (2026-07-25) showed them producing pure noise:
+#
+# * `autoRenewPeriod` was originally listed and is the opposite of expiring — it
+#   is the routine grace window *after an automatic renewal*. It flagged
+#   wildlifetrusts.org, whose registration runs to 2031.
+# * `pendingRestore` means the registrant is actively reclaiming the domain from
+#   redemption. Someone wanting it back is not a signal that it is becoming
+#   available.
 EXPIRING_STATUSES = frozenset(
     {
         "pending delete",
         "pendingdelete",
         "redemption period",
         "redemptionperiod",
-        "client hold",
+        "client hold",     # suspended and not resolving — a real problem signal
         "clienthold",
         "server hold",
         "serverhold",
-        "pending restore",
-        "pendingrestore",
-        "auto renew period",
     }
 )
 

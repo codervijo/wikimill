@@ -2,7 +2,7 @@
 
 How this project is built. Mechanisms, schemas, modules, and integrations. The "HOW" companion to `docs/prd.md`'s "WHY / WHAT".
 
-Status: **v1.B–v1.H shipped** (scaffold, config, storage, preflight, launcher, SQL ingest, normalization, crawler, classifier, domain checks, enrichment). Only scoring + export (v1.I) remain. Everything below marked *(vN.X)* is planned, not built.
+Status: **v1.B–v1.I shipped — the v1 tier is code-complete.** All eight pipeline stages and all nine CLI commands are implemented; `v1.J` is the soak. Everything below marked *(vN.X)* is planned, not built.
 
 ## 1. Project layout
 
@@ -55,8 +55,10 @@ wikimill/
 │   │   ├── seek.py            #   offset -> one bz2 block -> pages
 │   │   ├── wikitext.py        #   section, anchor, ref/cite context
 │   │   └── runner.py          #   block batching, single writer
-│   └── export.py              # (v1.I) scoring + candidate file
-├── tests/                     # 412 tests, hermetic (no network, no Docker)
+│   ├── score.py               # v1.I: explainable ranking (never exclusion)
+│   ├── inspect.py             # v1.I: everything known about one thing
+│   └── export.py              # v1.I: deterministic, attributable candidate file
+├── tests/                     # 433 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -305,13 +307,14 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 13. Testing
 
-412 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+433 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness
 - `test_preflight.py` — per-check markers, the gate, "every ✗ names a fix"
 - `test_cli.py` — command surface, exit codes, stubs naming their phase
 - `test_logging.py` — markers, JSONL, stderr/stdout split, colour suppression
+- `test_export.py` — scoring, determinism, attribution, inspect
 - `test_enrich.py` — the empty fast path (criterion 12), block seeking, wikitext
 - `test_domain.py` — resolver reconciliation, RDAP bootstrap, the unregistered gate
 - `test_classify.py` — the eleven states, marker restraint, state machine

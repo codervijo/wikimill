@@ -42,6 +42,20 @@ def test_jsonl_log_is_written_and_parseable(tmp_path):
     assert any(e.get("step") == "step-one" for e in events)
 
 
+def test_progress_reaches_the_durable_log(tmp_path):
+    """Terminal output is transient. During a long run the JSONL log is the only
+    way to tell a working crawl from a hung one."""
+    logs = tmp_path / "logs"
+    with RunLog("crawl", logs, quiet=True) as log:
+        log.progress("checked 250/400")
+        run_id = log.run_id
+    events = [
+        json.loads(line)
+        for line in (logs / f"{run_id}.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(e.get("progress") == "checked 250/400" for e in events)
+
+
 def test_unwritable_log_dir_does_not_abort(tmp_path):
     """A missing log directory must never kill a run — the terminal is what matters."""
     blocker = tmp_path / "notadir"

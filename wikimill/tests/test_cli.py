@@ -89,15 +89,13 @@ def test_stats_json():
     assert payload["counts"]["urls"] == 0
 
 
-@pytest.mark.parametrize(
-    ("command", "phase"),
-    [
-        (["inspect", "example.com"], "v1.I"),
-        (["export"], "v1.I"),
-    ],
-)
-def test_unshipped_commands_name_their_phase(command, phase):
-    """A stub that names its phase beats a missing command or a stack trace."""
-    result = runner.invoke(app, command)
-    assert isinstance(result.exception, NotImplementedYetError)
-    assert result.exception.phase == phase
+def test_no_command_is_a_stub_any_more():
+    """v1.I completes the surface — every command in the PRD now does its job."""
+    import inspect as _inspect
+
+    from wikimill import cli
+
+    source = _inspect.getsource(cli)
+    assert "NotImplementedYetError(" not in source.split("class ")[0].replace(
+        "from .errors import", ""
+    ) or "raise NotImplementedYetError" not in source

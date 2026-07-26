@@ -119,6 +119,17 @@ RECHECK_INTERVALS: Final[dict[str, int]] = {
     UrlState.BLOCKED_BY_ROBOTS: 180 * _DAY,
 }
 
+# Domain states that make a link worth enriching regardless of its URL state.
+#
+# Domain-level discovery can outpace URL-level classification: a domain is
+# confirmed `unregistered` by DNS + RDAP even when its URLs were never crawled
+# (they stay `pending`). Triggering on URL state alone meant the strongest finds
+# in the corpus exported with no Wikipedia context at all — the one thing that
+# makes them actionable. Found by running the full pipeline, 2026-07-25.
+DOMAIN_ENRICH_TRIGGER_STATES: Final[frozenset[str]] = frozenset(
+    {"unregistered", "expiring", "for_sale", "parked"}
+)
+
 # Classifications that make a link worth spending enrichment on (prd.md §11).
 # Deliberately excludes LIVE — that exclusion is the whole cheapest-first design.
 ENRICH_TRIGGER_STATES: Final[frozenset[str]] = frozenset(

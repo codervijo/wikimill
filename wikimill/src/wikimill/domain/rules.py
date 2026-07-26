@@ -22,10 +22,12 @@ from dataclasses import dataclass, field
 
 from ..constants import CLASSIFIER_VERSION, DomainState
 from .dns import DnsResult, DnsStatus
-from .rdap import RdapResult, RdapStatus, expires_within
+from .rdap import EXPIRING_STATUSES, RdapResult, RdapStatus
 
-# How far ahead an expiry date counts as "expiring".
-EXPIRY_WINDOW_DAYS = 60
+# How near an expiry date must be to warrant *watching closely*. It no longer
+# decides state — see the note in `classify` — but it does shorten the recheck
+# window so an approaching renewal date is not missed if it lapses.
+EXPIRY_WATCH_DAYS = 60
 
 
 @dataclass
@@ -41,7 +43,6 @@ def classify(
     rdap: RdapResult,
     *,
     url_states: dict[str, int] | None = None,
-    expiry_window_days: int = EXPIRY_WINDOW_DAYS,
 ) -> DomainVerdict:
     """Judge one domain from its DNS and RDAP evidence.
 
@@ -91,19 +92,23 @@ def classify(
         )
 
     # -- registered domains ------------------------------------------------
-    if rdap.status is RdapStatus.REGISTERED:
-        if rdap.expiring:
-            return DomainVerdict(
-                DomainState.EXPIRING,
-                reasons + [f"EPP status: {', '.join(rdap.statuses)}"],
-                0.95,
-            )
-        if expires_within(rdap.expiry, expiry_window_days):
-            return DomainVerdict(
-                DomainState.EXPIRING,
-                reasons + [f"expires {rdap.expiry} (within {expiry_window_days}d)"],
-                0.9,
-            )
+    if rdap.status is RdapStatus.REGISTERED and rdap.expiring:
+        # Only a registry lifecycle status makes a domain `expiring`.
+        #
+        # A near expiry date deliberately does NOT. Corrected after real data:
+        # "expires within 60 days" flagged ca.gov, gao.gov, osce.org and
+        # mindat.org — institutions on ordinary annual renewal cycles. Roughly a
+        # sixth of all domains sit inside any 60-day window at any moment, so the
+        # date carries almost no predictive weight and swamped the export with
+        # domains that will obviously renew. An approaching expiry now drives
+        # *recheck urgency* instead (runner.py), so the domain is watched closely
+        # and caught if it ever does enter redemption.
+        matched = [s for s in rdap.statuses if s.strip().lower() in EXPIRING_STATUSES]
+        return DomainVerdict(
+            DomainState.EXPIRING,
+            reasons + [f"registry lifecycle status: {', '.join(matched)}"],
+            0.95,
+        )
 
     # -- lift URL-level parking up to the domain ---------------------------
     lifted = _from_url_states(url_states or {})

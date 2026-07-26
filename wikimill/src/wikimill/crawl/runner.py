@@ -38,6 +38,10 @@ from . import robots as robots_mod
 from .fetcher import FetchResult, build_client, fetch
 from .politeness import Politeness, backoff_delay, should_retry
 
+# Results per commit. Small enough that a crash costs little, large enough that
+# committing is not the bottleneck.
+CHECKPOINT_EVERY = 25
+
 
 @dataclass
 class CrawlStats:
@@ -324,6 +328,11 @@ def run(
         robots_store = robots_mod.load_store(conn)
 
         pending = len(tasks)
+        # Committed every CHECKPOINT_EVERY results rather than once at the end.
+        # A single transaction around a long crawl would mean a crash loses the
+        # whole run — and would hold a write lock for its entire duration, so a
+        # concurrent `stats` or `inspect` write fails on busy_timeout. Re-crawling
+        # is not cheap: it costs real requests to other people's servers.
         conn.execute("BEGIN")
         try:
             with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -365,6 +374,10 @@ def run(
                     task, result, reason = item
                     _record(conn, task, result, reason, stats)
                     done += 1
+                    if done % CHECKPOINT_EVERY == 0:
+                        robots_mod.persist_store(conn, robots_store)
+                        conn.execute("COMMIT")
+                        conn.execute("BEGIN")
                     if done % 10 == 0 or done == pending:
                         log.progress(
                             f"checked {done:,}/{pending:,} "

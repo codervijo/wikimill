@@ -24,7 +24,8 @@ from ..logging import RunLog, utcnow
 from ..storage import open_db
 from . import dns as dns_mod
 from . import rdap as rdap_mod
-from .rules import classify
+from .rdap import expires_within
+from .rules import EXPIRY_WATCH_DAYS, classify
 
 # URL classifications that make a domain worth an authoritative check.
 INTERESTING_URL_STATES = (
@@ -160,6 +161,14 @@ def _record(
         ),
     )
     days = RECHECK_DAYS.get(verdict.state, 30)
+    # An approaching expiry no longer changes the *state* (it predicts almost
+    # nothing — most domains simply renew), but it is worth watching closely, so
+    # it shortens the recheck window. If the registration ever does lapse, the
+    # domain enters redemption and the next check catches it.
+    if verdict.state == DomainState.ACTIVE and expires_within(
+        rdap_result.expiry, EXPIRY_WATCH_DAYS
+    ):
+        days = min(days, 3)
     conn.execute(
         "UPDATE domains SET state=?, last_checked=?, next_check_at=datetime(?, ?) "
         "WHERE domain_id=?",

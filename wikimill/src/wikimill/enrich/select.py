@@ -15,7 +15,11 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from ..constants import ENRICH_TRIGGER_STATES, EnrichStatus
+from ..constants import (
+    DOMAIN_ENRICH_TRIGGER_STATES,
+    ENRICH_TRIGGER_STATES,
+    EnrichStatus,
+)
 
 
 @dataclass(frozen=True)
@@ -50,12 +54,16 @@ def count_pending(
     Called before anything opens a dump file, so the common "nothing is dead"
     case costs a count and nothing else.
     """
-    params: list = list(states)
+    domain_states = sorted(DOMAIN_ENRICH_TRIGGER_STATES)
+    params: list = [*states, *domain_states]
     sql = [
         "SELECT COUNT(*) FROM external_links e",
         "JOIN urls u ON u.url_hash = e.url_hash",
-        "WHERE u.state IN (" + ",".join("?" * len(states)) + ")",
-        "AND (e.enrich_status = ? OR e.enrich_dump_run IS NOT e.dump_run)",
+        "LEFT JOIN domains d ON d.domain_id = u.domain_id",
+        # URL state OR domain state — see DOMAIN_ENRICH_TRIGGER_STATES.
+        "WHERE (u.state IN (" + ",".join("?" * len(states)) + ")",
+        "   OR d.state IN (" + ",".join("?" * len(domain_states)) + "))",
+        "AND e.enrich_status = ?",
     ]
     params.append(EnrichStatus.PENDING)
     if dump_run:
@@ -79,13 +87,16 @@ def select(
     all ~100 of them. On an SSD that is a modest win; on the spinning external
     drive this project expects, it is the difference between minutes and hours.
     """
-    params: list = list(states)
+    domain_states = sorted(DOMAIN_ENRICH_TRIGGER_STATES)
+    params: list = [*states, *domain_states]
     sql = [
         "SELECT e.id, e.page_id, p.ms_offset, p.title, e.url_raw, u.state",
         "FROM external_links e",
         "JOIN urls u ON u.url_hash = e.url_hash",
+        "LEFT JOIN domains d ON d.domain_id = u.domain_id",
         "JOIN wiki_pages p ON p.page_id = e.page_id AND p.dump_run = e.dump_run",
-        "WHERE u.state IN (" + ",".join("?" * len(states)) + ")",
+        "WHERE (u.state IN (" + ",".join("?" * len(states)) + ")",
+        "   OR d.state IN (" + ",".join("?" * len(domain_states)) + "))",
         "AND e.enrich_status = ?",
         "AND p.ms_offset IS NOT NULL",
     ]

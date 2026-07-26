@@ -253,16 +253,44 @@ def test_active_domain():
     assert verdict.state == DomainState.ACTIVE
 
 
-def test_epp_status_makes_it_expiring():
-    rdap = RdapResult(RdapStatus.REGISTERED, statuses=["pendingDelete"])
-    assert classify(dns_ok(), rdap).state == DomainState.EXPIRING
 
 
-def test_near_expiry_makes_it_expiring():
+
+def test_near_expiry_alone_does_not_make_it_expiring():
+    """Corrected after real data: "expires within 60 days" flagged ca.gov,
+    gao.gov and osce.org — institutions on ordinary annual renewal cycles. About
+    a sixth of all domains sit in any 60-day window at any moment, so the date
+    predicts almost nothing. It now drives recheck urgency, not state."""
     from datetime import UTC, datetime, timedelta
     soon = (datetime.now(UTC) + timedelta(days=10)).isoformat()
     rdap = RdapResult(RdapStatus.REGISTERED, expiry=soon)
-    assert classify(dns_ok(), rdap).state == DomainState.EXPIRING
+    assert classify(dns_ok(), rdap).state == DomainState.ACTIVE
+
+
+def test_auto_renew_period_is_not_expiring():
+    """autoRenewPeriod is the grace window *after* an automatic renewal — the
+    opposite of expiring. It flagged wildlifetrusts.org, valid until 2031."""
+    rdap = RdapResult(
+        RdapStatus.REGISTERED,
+        statuses=["client transfer prohibited", "auto renew period"],
+        expiry="2031-06-29T00:00:00Z",
+    )
+    assert classify(dns_ok(), rdap).state == DomainState.ACTIVE
+
+
+def test_pending_restore_is_not_expiring():
+    """Someone actively reclaiming a domain is not a signal it is becoming
+    available."""
+    rdap = RdapResult(RdapStatus.REGISTERED, statuses=["pending restore"])
+    assert classify(dns_ok(), rdap).state == DomainState.ACTIVE
+
+
+@pytest.mark.parametrize("epp", ["pendingDelete", "redemption period", "clientHold"])
+def test_registry_lifecycle_statuses_do_make_it_expiring(epp):
+    rdap = RdapResult(RdapStatus.REGISTERED, statuses=[epp])
+    verdict = classify(dns_ok(), rdap)
+    assert verdict.state == DomainState.EXPIRING
+    assert any("lifecycle" in r for r in verdict.reasons)
 
 
 def test_parked_is_lifted_from_url_verdicts():
@@ -287,7 +315,7 @@ def test_for_sale_outranks_parked():
 
 def test_expiring_outranks_a_parked_page():
     """A registration winding down is more actionable than a parking page."""
-    rdap = RdapResult(RdapStatus.REGISTERED, statuses=["redemptionPeriod"])
+    rdap = RdapResult(RdapStatus.REGISTERED, statuses=["redemption period"])
     verdict = classify(dns_ok(), rdap, url_states={"parked": 5})
     assert verdict.state == DomainState.EXPIRING
 

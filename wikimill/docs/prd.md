@@ -2,7 +2,7 @@
 
 The canonical source of truth for purpose, scope, phases, and conformance. Code that contradicts this doc is drift, not feature.
 
-> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.H` shipped the same day; `v1.I` (inspect/stats/scoring/export) is next.
+> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.I` shipped the same day. **The v1 tier is code-complete**; `v1.J` is the soak.
 
 ## 1. Purpose
 
@@ -141,12 +141,37 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 | v1.F | ✅ done | Classifier: the eleven-state vocabulary (§11) + URL state machine + bounded evidence capture |
 | v1.G | ✅ done | Domain checks: multi-resolver DNS + RDAP → `domain_checks` + domain state; `unregistered` established here |
 | v1.H | ✅ done | **`enrich`**: multistream index loader → **offset-sorted, block-batched** seek/decompress → `mwparserfromhell` → section, anchor, ref/cite context, dead-link tags, for the selected subset only |
-| v1.I | ⏳ pending | `inspect`, `stats`, scoring, `export` (CSV + JSONL, evidence columns, licence header) |
+| v1.I | ✅ done | `inspect`, `stats`, scoring, `export` (CSV + JSONL, evidence columns, licence header) |
 | v1.J | ⏳ pending | First full bounded run + soak; measure everything §19 asks for |
 
 #### Design notes
 
-**v1.H** — ✅ shipped 2026-07-25. The expensive stage, and the one the whole pipeline is ordered to defer: `enrich/select.py` (what deserves it), `enrich/seek.py` (multistream random access), `enrich/wikitext.py` (context extraction), `enrich/runner.py`.
+**v1.I** — ✅ shipped 2026-07-25. `score.py`, `export.py`, `inspect.py`, and the CLI wiring for `inspect` and `export`. **Every command in §15 is now implemented — no stubs remain**, and a test asserts that.
+
+**Scoring ranks; it never excludes.** §10's filters decide what is out of scope; the score only orders what is left. A domain scoring zero still appears with its zero, because "we looked and it is uninteresting" is a different statement from "we never looked". Every component records its own contribution and a human-readable reason, so `inspect` can show *why* a domain ranked where it did and the operator can argue with the weighting rather than with an unexplained number. **The weights are policy defaults, not measured figures**, and are versioned so a change is detectable.
+
+**The export is deterministic by construction** — fixed column order, fixed row order with a name tie-break rather than insertion order. The same filter over the same database yields a byte-identical file with a matching `sha256` (acceptance criterion 19). Two exports a week apart therefore `diff` meaningfully, which is the change report the roadmap would otherwise have needed a feature for.
+
+**Attribution is structural, not a footnote.** Anchor text, section names and article titles are CC BY-SA excerpts, so every export carries the licence header and every row carries `example_article_url`. Whatever the operator later does with the file, the attribution is already in it (§17).
+
+`inspect` is read-only and never re-checks, so it is safe to run against a database a crawl is writing to.
+
+Two defects fixed while building this, both found by running the tool rather than by testing it:
+
+1. **The crawl wrapped its entire run in one transaction**, contradicting §13's "checkpoint after each batch" — a crash mid-crawl would have lost all 400 URLs, and the write lock blocked any concurrent writer for the run's duration. Now commits every 25 results. Re-crawling is not cheap: it costs real requests to other people's servers.
+2. **`RunLog.progress()` wrote to the terminal but not to the JSONL log**, so the durable record went silent during exactly the long stretch where it matters — the only way to distinguish a working crawl from a hung one without a debugger. Now written to both.
+
+**Three more corrections came from running the whole pipeline on 570 crawled URLs and 742 checked domains — none would have been found by testing:**
+
+3. **`autoRenewPeriod` was in `EXPIRING_STATUSES`.** It is the routine grace window *after* an automatic renewal — the opposite of expiring. It flagged `wildlifetrusts.org`, whose registration runs to **2031**. `pendingRestore` was removed for the same class of reason: a registrant actively reclaiming a domain is not a signal it is becoming available.
+4. **"Expiry within 60 days" was not evidence of anything.** It flagged `ca.gov`, `gao.gov`, `osce.org` and `mindat.org` — institutions on ordinary annual renewal cycles. Roughly a sixth of all domains sit inside any 60-day window at any moment, so the date carries almost no predictive weight, and it swamped the export with 13 "candidates" of which zero were real. **`expiring` now means a registry lifecycle status only** (`pendingDelete`, `redemptionPeriod`, `clientHold`/`serverHold`); an approaching expiry shortens the *recheck window* instead, so a domain that does lapse is still caught. §11 is corrected.
+5. **Enrichment triggered on URL state alone, so the best finds exported with no context.** Domain-level discovery outpaces URL-level classification: a domain is confirmed `unregistered` by DNS + RDAP even when its URLs were never crawled and remain `pending`. Both confirmed-available domains therefore exported with an empty section and anchor — the one thing that makes a candidate actionable. `enrich` now triggers on domain state as well (`DOMAIN_ENRICH_TRIGGER_STATES`).
+
+**The proof gate (criterion 17) is met, and independently verified.** From the real corpus: **`tetris-today.com`** — cited by *Tetromino* under §External links as a `{{cite}}` citation anchored **"The Father of Tetris"** — and **`radiopr740.com`** — cited by *Telecommunications in Puerto Rico*, anchored **"Radio Puerto Rico"**. Both confirmed `unregistered` by two independent resolvers plus an RDAP 404, and re-verified outside wikimill with `dig` and `curl` (NXDOMAIN + HTTP 404). Also surfaced: `marygordon.org.uk`, `for_sale`, cited by *Electric boat* §Golden Age.
+
+**The honest counterpoint:** before correction 4, the same corpus produced 13 candidates and *all* were noise. After it, six — of which three are real and three are `no_rdap_for_tld` (unverifiable, correctly scored low, one negative). That ratio is the argument for v1.J.
+
+**v1.H — ✅ shipped 2026-07-25. The expensive stage, and the one the whole pipeline is ordered to defer: `enrich/select.py` (what deserves it), `enrich/seek.py` (multistream random access), `enrich/wikitext.py` (context extraction), `enrich/runner.py`.
 
 **The empty-subset fast path was written first and tested first**, per the implementation sequence — it is the entire cheapest-first design made testable. `enrich` begins with a single indexed count; if nothing is pending it stops there, having opened neither the archive nor the index. A test asserts this by monkeypatching both `find_archive` and `read_block` to raise.
 
@@ -691,7 +716,7 @@ None of these block approval; each is answerable at its phase. Q1 and Q2 are wan
 - **Q4 (v1.F) — evidence-blob default.** Store 8 KB of body for non-`live` checks? Trades disk for offline re-classification. *Recommendation: yes, 8 KB, configurable.*
 - ~~**Q5 (v1.G) — RDAP access strategy**~~ — **resolved 2026-07-25 by measurement.** IANA bootstrap (RFC 9224) cached on disk for 7 days, RFC-correct longest-label match, then a direct query to the registry's own RDAP endpoint. Measured against the live registry: **1,200 TLDs across 590 service groups** — but `.de`, `.es`, `.io`, `.ru` and `.edu` publish **no RDAP at all**, so domains under them can never be *confirmed* unregistered and are recorded `no_rdap_for_tld`. No TLD needs bespoke handling; the gap is a coverage fact to report, not a special case to code around.
 - ~~**Q6 (v1.H) — enrichment trigger set**~~ — **resolved 2026-07-25 as recommended.** Defaults to `unregistered, for_sale, parked, dns_failure, tls_failure, soft_404, hard_404`; `live`, `redirect`, `temporarily_unavailable` and `unclassified` are excluded, because paying to extract context for a working link is exactly the work this ordering exists to avoid. Overridable with `--state`.
-- **Q7 (v1.I) — export columns.** What does a candidate row need to carry to be actionable without re-opening the tool? *Recommendation:* domain, state, last-checked, citing-page count, and one representative citation (page URL + section + anchor). Operator to confirm the set.
+- **Q7 (v1.I) — export columns.** Implemented as recommended, plus score, registrar, expiry, public suffix, private-suffix flag, `{{dead link}}` flag, archive URL, and the score breakdown — 18 columns. *Still open for operator confirmation:* whether that set is right, or too wide. It is cheap to trim; the deterministic-ordering guarantee is unaffected by which columns are present.
 - **Q8 (v4) — Wikimedia Enterprise.** Worth an account for free-tier Structured Contents (free since 2026-07-01) as an alternative enrichment path? Only re-evaluate after the local multistream path has soaked.
 
 ## 23. Implementation sequence

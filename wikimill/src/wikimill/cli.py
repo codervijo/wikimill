@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json as jsonlib
 import sys
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -21,9 +22,12 @@ from .classify import runner as classify_stage
 from .crawl import runner as crawl_stage
 from .domain import runner as domain_stage
 from .enrich import runner as enrich_stage
+from . import export as export_mod
+from . import inspect as inspect_mod
+from . import score as score_mod
 from .config import load as load_config
 from .constants import EXIT_INTERRUPTED, EXIT_OK, RunKind
-from .errors import Interrupted, NotImplementedYetError, WikimillError
+from .errors import ConfigError, Interrupted, NotImplementedYetError, WikimillError
 from .logging import RunLog
 from .wiki import msindex
 from .preflight import gate, run_checks, verify_dumps
@@ -285,7 +289,73 @@ def inspect(
     json_out: Annotated[bool, typer.Option("--json", help="Emit as JSON.")] = False,
 ) -> None:
     """Everything known about one URL or domain, including full check history."""
-    raise NotImplementedYetError("inspect", "v1.I")
+    cfg = load_config()
+    with RunLog(RunKind.PREFLIGHT, cfg.logs_dir, quiet=True) as log:
+        gate(cfg, log)
+    with open_db(cfg.db_path) as conn:
+        report = inspect_mod.gather(conn, target)
+
+    if json_out:
+        typer.echo(jsonlib.dumps(report.__dict__, indent=2, default=str))
+        return
+    if not report.found:
+        typer.echo(f"{target}: not in the database.")
+        typer.echo("  Nothing has been ingested for it, or it was filtered at normalization.")
+        raise typer.Exit(1)
+
+    d = report.domain
+    if d:
+        typer.echo(f"{d['registrable_domain']}  ·  {d['state']}  ·  score {d['candidate_score'] or 0}")
+        typer.echo(f"  cited by {d['wiki_page_count']} page(s) via {d['wiki_link_count']} link(s)"
+                   f"  ·  {d['url_count']} url(s)")
+        if d["last_checked"]:
+            typer.echo(f"  last checked {d['last_checked']}  ·  next {d['next_check_at']}")
+        if d["is_private_suffix"]:
+            typer.echo(f"  under private suffix {d['public_suffix']} — may not be independently acquireable")
+
+    if report.score and report.score.get("components"):
+        typer.echo("\nscore")
+        for c in report.score["components"]:
+            typer.echo(f"  {c['points']:+4d}  {c['name']:<22} {c['detail']}")
+
+    if report.domain_checks:
+        typer.echo("\ndomain checks")
+        for c in report.domain_checks[:5]:
+            typer.echo(f"  {c['checked_at']}  dns={c['dns_status']} rdap={c['rdap_status']}"
+                       f" agreed={bool(c['resolvers_agreed'])}  -> {c.get('verdict')}")
+            if c.get("registrar"):
+                typer.echo(f"      registrar={c['registrar']}  expiry={c['registration_expiry']}")
+
+    if report.urls:
+        typer.echo("\nurls")
+        for u in report.urls[:12]:
+            typer.echo(f"  [{u['state']:<22}] {u['url_normalized'][:78]}")
+
+    if report.checks:
+        typer.echo("\ncheck history")
+        for c in report.checks[:10]:
+            status = c["http_status"] if c["http_status"] is not None else (c["error_kind"] or "-")
+            typer.echo(f"  {c['checked_at']}  {str(status):>14}  -> {c['classification'] or '-'}")
+            if c["reasons"]:
+                try:
+                    why = ", ".join(jsonlib.loads(c["reasons"]))
+                    typer.echo(f"      why: {why[:88]}")
+                except (ValueError, TypeError):
+                    pass
+
+    if report.citations:
+        typer.echo("\ncited by")
+        for c in report.citations[:10]:
+            line = f"  {c['title']}"
+            if c["section"]:
+                line += f"  §{c['section']}"
+            if c["link_kind"]:
+                line += f"  [{c['link_kind']}]"
+            typer.echo(line)
+            if c["anchor_text"]:
+                typer.echo(f"      anchor: {c['anchor_text'][:76]!r}")
+            if c["dead_link_tagged"]:
+                typer.echo("      Wikipedia has tagged this {{dead link}}")
 
 
 @app.command(name="export")
@@ -302,7 +372,41 @@ def export_cmd(
     out: Annotated[str | None, typer.Option("--out", help="Output path.")] = None,
 ) -> None:
     """Write a self-contained candidate file with full Wikipedia evidence."""
-    raise NotImplementedYetError("export", "v1.I")
+    cfg = load_config()
+    if fmt not in ("csv", "jsonl"):
+        raise ConfigError(
+            f"Unknown --format {fmt!r}.", remediation="Use --format csv or --format jsonl."
+        )
+    states = (
+        [s.strip() for s in state.split(",") if s.strip()]
+        if state
+        else list(export_mod.DEFAULT_STATES)
+    )
+    with RunLog(RunKind.EXPORT, cfg.logs_dir) as log:
+        gate(cfg, log)
+        with open_db(cfg.db_path) as conn:
+            conn.execute("BEGIN")
+            scored = score_mod.rescore_all(conn)
+            conn.execute("COMMIT")
+            log.ok("scored", f"{scored:,} domain(s) · scorer v{score_mod.SCORER_VERSION}")
+
+            path = Path(out) if out else cfg.outputs_dir / f"candidates.{fmt}"
+            conn.execute("BEGIN")
+            stats = export_mod.write(
+                conn, path, states=states, min_pages=min_pages, fmt=fmt
+            )
+            conn.execute("COMMIT")
+
+        log.ok("states", ", ".join(states))
+        if stats.rows:
+            log.ok("exported", f"{stats.rows:,} candidate(s) -> {stats.path}")
+            log.progress(f"sha256 {stats.sha256[:32]}…")
+        else:
+            log.warn(
+                "exported",
+                f"0 candidates matched — nothing is in {', '.join(states)} "
+                f"with >= {min_pages} citing page(s)",
+            )
 
 
 def main() -> None:
