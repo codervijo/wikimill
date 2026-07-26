@@ -2,7 +2,7 @@
 
 The canonical source of truth for purpose, scope, phases, and conformance. Code that contradicts this doc is drift, not feature.
 
-> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.I` shipped the same day. **The v1 tier is code-complete**; `v1.J` is the soak.
+> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. **v1 is complete** — `v1.A`–`v1.J` all shipped. Soak measurements and the operator's verdict on the finds are in `docs/soak-report.md`; v2 is next.
 
 ## 1. Purpose
 
@@ -142,11 +142,25 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 | v1.G | ✅ done | Domain checks: multi-resolver DNS + RDAP → `domain_checks` + domain state; `unregistered` established here |
 | v1.H | ✅ done | **`enrich`**: multistream index loader → **offset-sorted, block-batched** seek/decompress → `mwparserfromhell` → section, anchor, ref/cite context, dead-link tags, for the selected subset only |
 | v1.I | ✅ done | `inspect`, `stats`, scoring, `export` (CSV + JSONL, evidence columns, licence header) |
-| v1.J | ⏳ pending | First full bounded run + soak; measure everything §19 asks for |
+| v1.J | ✅ done | First full bounded run + soak; measured in `docs/soak-report.md` |
 
 #### Design notes
 
-**v1.I** — ✅ shipped 2026-07-25. `score.py`, `export.py`, `inspect.py`, and the CLI wiring for `inspect` and `export`. **Every command in §15 is now implemented — no stubs remain**, and a test asserts that.
+**v1.J** — ✅ shipped 2026-07-26. The soak. Full report in **`docs/soak-report.md`**; the load-bearing results:
+
+**The full 4.9 GB dump was ingested for real: 61.8 minutes, 28 MB peak RSS**, ~190M rows scanned → 1,432,352 link occurrences, 1,326,045 URLs, 135,591 domains, 1.15 GB database. Twenty-eight megabytes to process 4.9 gigabytes is the streaming design validated completely.
+
+**Two filters designed on reasoning were vindicated by measurement.** Archive unwrapping handled **428,101 links (~30%)** — without it nearly a third of the corpus would have measured the Internet Archive's uptime instead of the cited domain's. Identifier-resolver filtering removed **205,472 (~14%)**, exactly the queue domination §10 predicted. Together, 44% of raw links.
+
+**Scale changed the answer to the most important question.** On the 4 MB sample, 89% of domains were cited by exactly one article, and citation count looked useless as a quality signal. On the full dump it is 71%, with **22,328 domains cited by 3+ articles and 6,110 by 10+**. `--min-pages` is a real lever at scale rather than a way to empty the output — so the earlier conclusion that availability swamps citation weight was drawn from a corpus where citation weight could not vary, and should be re-tuned after a crawl at this scale rather than against the same 440 URLs.
+
+**The proof gate passed and the operator judged all three finds duds** — the most important result in the soak. `tetris-today.com` is trademarked; `radiopr740.com` is a niche mismatch. Both are genuinely available. **The tool was factually correct and useless on judgement**, which is a different failure from a miscalibrated weight and one no reweighting would have caught. Trademark screening and niche matching are recorded as known gaps, deliberately not built.
+
+**One real defect found:** `count_pending` did not mirror `select` — it omitted the `wiki_pages` join and `ms_offset` guard, so an unreachable link was counted as pending, made `enrich` open the archive for nothing (defeating the criterion-12 fast path), and stayed pending forever. Fixed with regression tests. The soak harness was also wrong twice in ways worth recording, since both were false alarms that could have prompted bad fixes.
+
+**Honestly unmeasured:** enrichment cost on HDD storage (only SSD available — the criterion-23 comparison is outstanding, not estimated), and any crawl at corpus scale (440 of 1,326,045 URLs is 0.03%).
+
+**v1.I — ✅ shipped 2026-07-25. `score.py`, `export.py`, `inspect.py`, and the CLI wiring for `inspect` and `export`. **Every command in §15 is now implemented — no stubs remain**, and a test asserts that.
 
 **Scoring ranks; it never excludes.** §10's filters decide what is out of scope; the score only orders what is left. A domain scoring zero still appears with its zero, because "we looked and it is uninteresting" is a different statement from "we never looked". Every component records its own contribution and a human-readable reason, so `inspect` can show *why* a domain ranked where it did and the operator can argue with the weighting rather than with an unexplained number. **The weights are policy defaults, not measured figures**, and are versioned so a change is detectable.
 

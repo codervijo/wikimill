@@ -349,3 +349,31 @@ def test_dry_run_reads_and_writes_nothing(cfg, log):
         assert conn.execute(
             "SELECT enrich_status FROM external_links"
         ).fetchone()["enrich_status"] == EnrichStatus.PENDING
+
+
+def test_count_pending_matches_what_select_can_actually_reach(cfg):
+    """Regression: `count_pending` omitted the wiki_pages join and the
+    `ms_offset` guard that `select()` applies, so a link whose page has no
+    offset was counted as pending but never selectable — enrich would open the
+    archive for nothing and leave the row pending forever."""
+    with open_db(cfg.db_path) as conn:
+        seed(conn, url_state=UrlState.HARD_404)
+        conn.execute("UPDATE wiki_pages SET ms_offset=NULL")
+        states = parse_states(None)
+        from wikimill.enrich.select import select as select_candidates
+        assert count_pending(conn, states) == len(select_candidates(conn, states))
+
+
+def test_unreachable_link_does_not_defeat_the_fast_path(cfg, log, monkeypatch):
+    """With nothing *reachable* to enrich, the archive must still stay closed."""
+    with open_db(cfg.db_path) as conn:
+        seed(conn, url_state=UrlState.HARD_404)
+        conn.execute("UPDATE wiki_pages SET ms_offset=NULL")
+
+    def explode(*_a, **_kw):
+        raise AssertionError("opened the archive for work it cannot do")
+
+    monkeypatch.setattr("wikimill.enrich.seek.find_archive", explode)
+    stats = enrich_runner.run(cfg, log)
+    assert stats.pending == 0
+    assert stats.blocks_read == 0

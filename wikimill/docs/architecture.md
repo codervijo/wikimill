@@ -2,7 +2,7 @@
 
 How this project is built. Mechanisms, schemas, modules, and integrations. The "HOW" companion to `docs/prd.md`'s "WHY / WHAT".
 
-Status: **v1.B–v1.I shipped — the v1 tier is code-complete.** All eight pipeline stages and all nine CLI commands are implemented; `v1.J` is the soak. Everything below marked *(vN.X)* is planned, not built.
+Status: **v1 complete (v1.A–v1.J).** All eight pipeline stages and all nine CLI commands implemented, soaked against the full 4.9 GB dump — see `docs/soak-report.md`. v2 next. Everything below marked *(vN.X)* is planned, not built.
 
 ## 1. Project layout
 
@@ -58,7 +58,7 @@ wikimill/
 │   ├── score.py               # v1.I: explainable ranking (never exclusion)
 │   ├── inspect.py             # v1.I: everything known about one thing
 │   └── export.py              # v1.I: deterministic, attributable candidate file
-├── tests/                     # 433 tests, hermetic (no network, no Docker)
+├── tests/                     # 441 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -307,7 +307,7 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 13. Testing
 
-433 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+441 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness

@@ -56,14 +56,20 @@ def count_pending(
     """
     domain_states = sorted(DOMAIN_ENRICH_TRIGGER_STATES)
     params: list = [*states, *domain_states]
+    # The joins and the ms_offset guard must MATCH `select()` exactly. If this
+    # count is broader, `enrich` reports pending work it cannot actually reach:
+    # the fast path is defeated, the archive is opened for nothing, and those
+    # rows stay pending forever on every subsequent run.
     sql = [
         "SELECT COUNT(*) FROM external_links e",
         "JOIN urls u ON u.url_hash = e.url_hash",
         "LEFT JOIN domains d ON d.domain_id = u.domain_id",
+        "JOIN wiki_pages p ON p.page_id = e.page_id AND p.dump_run = e.dump_run",
         # URL state OR domain state — see DOMAIN_ENRICH_TRIGGER_STATES.
         "WHERE (u.state IN (" + ",".join("?" * len(states)) + ")",
         "   OR d.state IN (" + ",".join("?" * len(domain_states)) + "))",
         "AND e.enrich_status = ?",
+        "AND p.ms_offset IS NOT NULL",
     ]
     params.append(EnrichStatus.PENDING)
     if dump_run:
