@@ -2,7 +2,7 @@
 
 How this project is built. Mechanisms, schemas, modules, and integrations. The "HOW" companion to `docs/prd.md`'s "WHY / WHAT".
 
-Status: **v1.B–v1.E shipped** (scaffold, config, storage, preflight, launcher, SQL ingest, normalization, crawler). Everything below marked *(vN.X)* is planned, not built.
+Status: **v1.B–v1.F shipped** (scaffold, config, storage, preflight, launcher, SQL ingest, normalization, crawler, classifier). Everything below marked *(vN.X)* is planned, not built.
 
 ## 1. Project layout
 
@@ -40,11 +40,15 @@ wikimill/
 │   │   ├── politeness.py      #   backoff, per-host pacing, circuit breaker
 │   │   ├── fetcher.py         #   one URL -> one url_checks row of evidence
 │   │   └── runner.py          #   domain-partitioned workers, single writer
-│   ├── classify/              # (v1.F) http.py · parked.py · soft404.py · state.py
+│   ├── classify/              # v1.F: stage 4, a pure function over evidence
+│   │   ├── signals.py         #   marker vocabularies (parking, sale, soft-404)
+│   │   ├── rules.py           #   Observation -> Verdict
+│   │   ├── state.py           #   state machine, cadences, terminality
+│   │   └── runner.py          #   offline re-classification (no network)
 │   ├── domain/                # (v1.G) dns.py · rdap.py
 │   ├── enrich/                # (v1.H) select.py · seek.py · wikitext.py
 │   └── export.py              # (v1.I) scoring + candidate file
-├── tests/                     # 290 tests, hermetic (no network, no Docker)
+├── tests/                     # 347 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -73,7 +77,7 @@ externallinks SQL dump ─▶ normalize ─▶ URL queue ─▶ HTTP crawl ─�
 **Two structural rules hold it together:**
 
 - **Enrichment consumes classification; it never precedes it.** Every stage before it works on URLs and page IDs alone.
-- **Classification is a pure function over a stored check row.** Each `url_checks` row keeps bounded evidence plus the `classifier_version` that judged it, so an improved classifier re-classifies **offline** — no refetching, no extra load on third-party sites.
+- **Classification is a pure function over a stored check row.** Each `url_checks` row keeps bounded evidence; the verdict lives in `url_classifications` with the `classifier_version` that produced it. So an improved classifier re-judges history **offline** — no refetching, no extra load on third-party sites — and the old verdicts stay on record for comparison (§6).
 
 ## 3. Random access into the article dump
 
@@ -151,7 +155,43 @@ reserved for the unambiguous: bare IPs, Wikimedia hosts, identifier resolvers.
 An earlier version called this `is_user_content_suffix` and did exclude — which
 would have silently dropped real finds (migration 2 renames it).
 
-## 6. Storage
+## 6. Classification
+
+Stage 4. A **pure function**: `Observation -> Verdict`, with no network, no
+database and no clock. The observation is reconstructed either from a fresh
+fetch or from a `url_checks` row read back months later, which is what makes
+`crawl --reclassify` possible — on the real corpus it re-judged every stored
+observation in 0.0s with zero requests.
+
+**Verdicts live apart from observations.** `url_checks` is immutable (§20 forbids
+UPDATE-ing it), so a verdict column there could never be revised. Verdicts go to
+append-only `url_classifications`, keyed by `(check_id, classifier_version)`.
+Re-classification appends, making a rule change auditable: you can see which
+verdicts flipped and when.
+
+**Rules are ordered by confidence, not convenience:** transport facts first (a
+DNS failure is not a matter of opinion), then status codes, then content
+heuristics — the only guesswork in the system. Every verdict records which
+markers fired plus a confidence, so a wrong call is traceable rather than
+arguable.
+
+**`unregistered` is unreachable from this module by construction.** It needs two
+resolvers agreeing plus RDAP (v1.G). A false "available domain" is the most
+expensive error this tool can make, so no code path leads there from a fetch,
+and a test asserts it across every HTTP shape.
+
+**Marker restraint is the hard part.** Bare `"error"` was a soft-404 title marker
+until its own test caught it matching *"Standard Error in Statistics"* — marking
+live pages dead, the mistake an operator would act on. A marker now only earns
+its place if it is implausible in a genuine page title; weak parking words never
+fire alone; and an article *about* domain parking is not parked.
+
+Two §11 rules enforced in `state.py` rather than left to callers: **`unregistered`
+is never terminal** (it is the *most* urgent recheck — anyone can register the
+domain tomorrow), and **`hard_404` does not kill the domain** (only domain checks
+may set a domain state).
+
+## 7. Storage
 
 SQLite, single file, WAL, at `state/wikimill.db`. Ten tables (schema in `storage/schema.py`, documented in `prd.md` §9).
 
@@ -162,7 +202,7 @@ SQLite, single file, WAL, at `state/wikimill.db`. Ten tables (schema in `storage
 - **Migrations are forward-only** and applied in a single transaction, so a failure leaves the previous version intact rather than a half-migrated database. A database from a *newer* build is refused rather than silently downgraded.
 - **`urls.normalizer_version`** records which ruleset produced each `url_hash`. Changing a normalization rule changes the hash; without this column that would silently fork identity across the table.
 
-## 7. Configuration
+## 8. Configuration
 
 All configuration is environment variables, sourced from a mounted `wikimill.env`. Precedence: **process environment > `wikimill.env` > built-in default.**
 
@@ -179,7 +219,7 @@ The launcher forwards every other host `WIKIMILL_*` variable with `-e` *after* `
 
 **Secrets.** None are needed at v1, but the whole path is built: gitignored `wikimill.env`, committed `.example` with no real values, and redaction of any variable matching `*_KEY|*_TOKEN|*_SECRET|*_PASSWORD` across `preflight`, `--json`, logs, and `crawl_runs.args`. Retrofitting this around a key that has already been committed once is far more expensive.
 
-## 8. Preflight
+## 9. Preflight
 
 A registry of small check functions, each returning a `CheckResult(marker, step, detail, remediation)`. Runs before every state-touching command and aborts on ✗ before any work, network request, or dump read.
 
@@ -192,7 +232,7 @@ Two decisions worth knowing:
 
 Checksums are cached as `(path, size, mtime, sha256)` and re-hashed only when size or mtime changes — verifying 32 GB over USB on every command would otherwise dominate runtime. `--verify-dumps` forces a full re-hash.
 
-## 9. Output contract
+## 10. Output contract
 
 - **Every step ends in exactly one marker**, including boring ones — the consistency is what makes a long log scannable. `✓` succeeded or already-correct · `↷` skipped/transient (retry helps) · `✗` permanent (operator must act).
 - **Markers go to stderr**, so stdout stays clean for `--json` and file output.
@@ -205,7 +245,7 @@ Checksums are cached as `(path, size, mtime, sha256)` and re-hashed only when si
 
 Note: Typer's `no_args_is_help` is deliberately unused — Click implements it by exiting **2**, which would collide with the preflight-failure code. The root callback prints help and exits 0 instead.
 
-## 10. Runtime
+## 11. Runtime
 
 Two paths, one Dockerfile. Crawlers run inside Docker, never on the host; `bin/wikimill` and `bin/install` are the only host-side code, they are bash, and they execute no Python.
 
@@ -225,15 +265,16 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 **Two different dry-runs, deliberately distinguished.** `WIKIMILL_DRY_RUN` is *launcher-level*: print the docker invocation and every mount, start nothing — which is also what makes the launcher testable with no Docker present. `ingest --dry-run` / `enrich --dry-run` are *command-level*: the container starts and reports what work it would do.
 
-## 11. Testing
+## 12. Testing
 
-290 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+347 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness
 - `test_preflight.py` — per-check markers, the gate, "every ✗ names a fix"
 - `test_cli.py` — command surface, exit codes, stubs naming their phase
 - `test_logging.py` — markers, JSONL, stderr/stdout split, colour suppression
+- `test_classify.py` — the eleven states, marker restraint, state machine
 - `test_crawl.py` — SSRF guards, robots.txt, fetcher, politeness (MockTransport + fake resolver)
 - `test_normalize.py` — canonicalization, archive unwrapping, PSL, filtering
 - `test_eldomain.py` / `test_dump_sql.py` / `test_ingest.py` — v1.C parsers + stage
@@ -241,7 +282,7 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 **Suite-green is not feature-proven.** These verify code correctness. The acceptance criteria that matter (`prd.md` §19) need a real dump and a real crawl.
 
-## 12. Tracked refactors
+## 13. Tracked refactors
 
 Logged as they arise, per house convention.
 
@@ -252,6 +293,8 @@ Logged as they arise, per house convention.
   Deferred because wikimill sends no credentials and reads nothing into a trust
   boundary, so the residual exposure is a request being made rather than data
   disclosed — but it is a real gap, not a solved problem.
-- **Provisional recheck cadence (v1.E).** Until v1.F classifies, a crawled URL is
-  marked `unclassified` and rechecked on a flat 7-day cadence. The real, per-state
-  cadences in prd.md §12 land with the classifier.
+- **Parking-signature drift (v1.F).** `classify/signals.py` is heuristics over
+  attacker-influenceable text, and parking providers change their templates.
+  Because verdicts are versioned and stored apart from observations, tightening
+  the lists is a `CLASSIFIER_VERSION` bump plus `crawl --reclassify` — no
+  refetching — but the lists still need periodic review against real misses.

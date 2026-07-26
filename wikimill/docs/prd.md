@@ -2,7 +2,7 @@
 
 The canonical source of truth for purpose, scope, phases, and conformance. Code that contradicts this doc is drift, not feature.
 
-> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.E` shipped the same day; `v1.F` (the classifier) is next.
+> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.F` shipped the same day; `v1.G` (domain checks) is next.
 
 ## 1. Purpose
 
@@ -138,7 +138,7 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 | v1.C | ✅ done | SQL ingest: streaming `INSERT`-tuple parser, reversed-domain un-mangling, page-ID slice filter, namespace-filter verification → `wiki_pages` (id+title from the index) + `external_links` (context columns null) |
 | v1.D | ✅ done | Normalization + dedup (§10) → `urls` + `domains`; archive-URL unwrapping; scheme / internal-domain / resolver filtering |
 | v1.E | ✅ done | Crawler: robots-aware, rate-limited, redirect-tracking `httpx` fetcher → append-only `url_checks` |
-| v1.F | ⏳ pending | Classifier: the eleven-state vocabulary (§11) + URL state machine + bounded evidence capture |
+| v1.F | ✅ done | Classifier: the eleven-state vocabulary (§11) + URL state machine + bounded evidence capture |
 | v1.G | ⏳ pending | Domain checks: multi-resolver DNS + RDAP → `domain_checks` + domain state; `unregistered` established here |
 | v1.H | ⏳ pending | **`enrich`**: multistream index loader → **offset-sorted, block-batched** seek/decompress → `mwparserfromhell` → section, anchor, ref/cite context, dead-link tags, for the selected subset only |
 | v1.I | ⏳ pending | `inspect`, `stats`, scoring, `export` (CSV + JSONL, evidence columns, licence header) |
@@ -146,7 +146,19 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 
 #### Design notes
 
-**v1.E** — ✅ shipped 2026-07-25. The crawler: `crawl/guard.py` (SSRF), `crawl/robots.py` (RFC 9309), `crawl/politeness.py` (backoff, circuit breaker), `crawl/fetcher.py`, `crawl/runner.py`. First phase to touch the network, so §17 politeness and §18 security stop being theory. **It records evidence and does not classify** — v1.F re-judges these very rows offline, with no refetching.
+**v1.F** — ✅ shipped 2026-07-25. The classifier: `classify/signals.py` (marker vocabularies), `classify/rules.py` (the pure function), `classify/state.py` (state machine + cadences), `classify/runner.py` (offline re-classification). Runs inline inside `crawl`, and re-runnable via `crawl --reclassify` — no new verb, since classify is a sub-step of crawl in the stage contract.
+
+**A spec conflict this phase had to resolve.** §9 put `classification` on `url_checks`; §20 forbids ever `UPDATE`-ing that table; and re-judging stored evidence is the whole design. All three cannot hold. Resolved in favour of the invariant: verdicts moved to an append-only `url_classifications` table (migration 3), and the three verdict columns were dropped from `url_checks`. Re-classification now appends, so a rule change is auditable rather than destructive. §9 is corrected above.
+
+**Rule ordering is by confidence, not convenience:** transport facts first (a DNS failure is not a matter of opinion), then status codes, then content heuristics — the only guesswork in the system. Every verdict records *which markers fired* and a confidence, so a wrong call is traceable to the rule that made it rather than argued about.
+
+**`unregistered` is unreachable from this module by construction**, and a test asserts it across every HTTP shape. It requires two resolvers agreeing plus RDAP (v1.G); a false "available domain" is the most expensive error this tool can make.
+
+**A false positive caught by its own test suite.** Bare `"error"` and `"oops"` were soft-404 title markers, which matched genuine titles like *"Standard Error in Statistics"* and *"Trial and Error"* — marking live pages dead, the mistake the operator would actually act on. Both removed; a marker now only earns its place if it is implausible in a real page title. Weak parking words (`"related searches"`) likewise never fire alone, and an article *about* domain parking is not classified as parked.
+
+**Verified on real data:** 40 URLs crawled and classified — 14 `redirect`, 13 `blocked_by_robots`, 7 `live`, 5 `hard_404`, 1 `temporarily_unavailable` — with cadences landing exactly per §12 (90 days for live/redirect, 180 for robots-blocked, 30 for hard_404 pending its third confirmation, 1 hour for the transient). Re-classifying all 40 stored observations took **0.0s and zero network requests**, which is the payoff of keeping classification pure. Three real cross-domain handovers surfaced: `iht.com`→NYT, `strangersinparadise.com`→`abstractstudiocomics.com`, `bible.gospelcom.net`→`biblegateway.com`. 347 hermetic tests.
+
+**v1.E — ✅ shipped 2026-07-25. The crawler: `crawl/guard.py` (SSRF), `crawl/robots.py` (RFC 9309), `crawl/politeness.py` (backoff, circuit breaker), `crawl/fetcher.py`, `crawl/runner.py`. First phase to touch the network, so §17 politeness and §18 security stop being theory. **It records evidence and does not classify** — v1.F re-judges these very rows offline, with no refetching.
 
 Two structural properties, chosen so they cannot quietly rot: **work is partitioned by registrable domain** and each partition goes to exactly one worker, so per-domain concurrency of 1 is a property of the shape rather than a lock a later change could drop; and **only the main thread writes**, so Ctrl-C can never interrupt a half-written batch.
 
@@ -309,6 +321,12 @@ Unique: `(page_id, url_hash, dump_run)`.
 
 **`domains`** — one row per **registrable domain** (PSL-derived).
 `domain_id PK` · `registrable_domain ✱ UNIQUE` · `public_suffix` · `is_private_suffix` (bool — the host sits under a PSL *private-section* suffix; a **fact, not a verdict**, see §10) · `state ✱` (§11) · `terminal` · `first_seen` · `last_checked` · `next_check_at ✱` · `wiki_page_count` · `wiki_link_count` · `url_count` · `candidate_score` · `score_explanation` (JSON)
+
+**`url_classifications`** — **append-only verdicts, separate from observations** (added v1.F, migration 3).
+`id PK` · `check_id ✱ →url_checks` · `url_hash ✱` · `classified_at` · `classifier_version` · `classification ✱` · `reasons` (JSON — which markers fired) · `confidence`
+Unique: `(check_id, classifier_version)`.
+
+*Why a separate table:* §20 forbids ever `UPDATE`-ing `url_checks`, and re-judging stored evidence with an improved classifier is the point of the design — the two cannot both hold with a verdict column on the observation. Verdicts moved out, so `url_checks` stays a pure immutable record of what was *observed*, and re-classification appends. That also makes classifier disagreement auditable: you can see exactly which verdicts a rule change flipped, and when.
 
 **`domain_checks`** — **append-only.**
 `id PK` · `domain_id ✱` · `checked_at ✱` · `dns_status` (`ok` | `nxdomain` | `servfail` | `timeout` | `no_records`) · `a_records` (JSON) · `ns_records` (JSON) · `resolvers_agreed` (bool) · `rdap_status` (`registered` | `not_found` | `unavailable` | `no_rdap_for_tld`) · `rdap_raw` (JSON, bounded) · `registrar` · `registration_expiry` · `domain_statuses` (JSON — EPP codes: `clientHold`, `pendingDelete`, `redemptionPeriod`, …) · `classification` · `classifier_version` · `latency_ms` · `error_kind`

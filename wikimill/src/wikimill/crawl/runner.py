@@ -11,10 +11,9 @@ Two structural decisions carry this module:
    thread as results arrive. No SQLite threading pragmas, no write lock, and
    Ctrl-C can never interrupt a half-written batch.
 
-This stage records evidence and does **not** classify — that is v1.F, which will
-re-judge these very rows offline without refetching. Until then a checked URL is
-marked `unclassified`, which is honest: we have observed it but not yet decided
-what the observation means.
+Classification (stage 4, v1.F) runs inline here from the evidence each row just
+stored — never from the live response object — so `crawl --reclassify` reaches
+exactly the same verdict later, offline, with no refetching.
 """
 
 from __future__ import annotations
@@ -23,11 +22,13 @@ import json
 import queue
 import sqlite3
 import threading
-from collections import defaultdict
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit
 
 from .. import __version__
+from ..classify import state as classify_state
+from ..classify.rules import Observation, classify
 from ..config import Config
 from ..constants import RunKind, UrlState
 from ..errors import CrawlError
@@ -36,9 +37,6 @@ from ..storage import open_db
 from . import robots as robots_mod
 from .fetcher import FetchResult, build_client, fetch
 from .politeness import Politeness, backoff_delay, should_retry
-
-# Until v1.F classifies, a checked URL is revisited on this cadence.
-PROVISIONAL_RECHECK_SECS = 7 * 86_400
 
 
 @dataclass
@@ -50,6 +48,7 @@ class CrawlStats:
     retried: int = 0
     hosts_tripped: int = 0
     skipped_not_due: int = 0
+    verdicts: Counter = field(default_factory=Counter)
 
 
 @dataclass
@@ -107,10 +106,17 @@ def _record(
             "crawler_version) VALUES (?,?,?,?)",
             (task.url_hash, now, robots_decision, __version__),
         )
+        check_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
-            "UPDATE urls SET state=?, last_checked=?, check_count=check_count+1, "
-            "next_check_at=datetime(?, '+180 days') WHERE url_hash=?",
-            (UrlState.BLOCKED_BY_ROBOTS, now, now, task.url_hash),
+            "UPDATE urls SET last_checked=?, check_count=check_count+1 "
+            "WHERE url_hash=?",
+            (now, task.url_hash),
+        )
+        verdict = classify(
+            Observation(url=task.url, robots_decision=robots_decision, fetched=False)
+        )
+        classify_state.record(
+            conn, check_id=check_id, url_hash=task.url_hash, verdict=verdict
         )
         stats.blocked_by_robots += 1
         return
@@ -141,18 +147,22 @@ def _record(
             __version__,
         ),
     )
+    check_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     conn.execute(
-        "UPDATE urls SET state=?, last_checked=?, check_count=check_count+1, "
-        "consecutive_failures=?, next_check_at=datetime(?, ?) WHERE url_hash=?",
-        (
-            UrlState.UNCLASSIFIED,
-            now,
-            0 if result.ok else 1,
-            now,
-            f"+{PROVISIONAL_RECHECK_SECS // 86400} days",
-            task.url_hash,
-        ),
+        "UPDATE urls SET last_checked=?, check_count=check_count+1 WHERE url_hash=?",
+        (now, task.url_hash),
     )
+    # Classified inline (stage 4 runs inside crawl), from the same evidence the
+    # row just stored — so `crawl --reclassify` later reaches the same verdict.
+    observation = Observation.from_result(result, task.url, robots_decision)
+    observation = replace(
+        observation, cross_domain_redirect=_crossed_domain(task.url, result.final_url)
+    )
+    verdict = classify(observation)
+    classify_state.record(
+        conn, check_id=check_id, url_hash=task.url_hash, verdict=verdict
+    )
+    stats.verdicts[verdict.classification] += 1
     if result.ok:
         stats.fetched += 1
     else:
@@ -376,7 +386,7 @@ def run(
             "INSERT OR REPLACE INTO crawl_runs "
             "(run_id, kind, started_at, ended_at, counts, outcome) VALUES (?,?,?,?,?,?)",
             (log.run_id, RunKind.CRAWL, log.started_at, utcnow(),
-             json.dumps(stats.__dict__), "failed" if log.failed else "ok"),
+             json.dumps({k: (dict(v) if isinstance(v, Counter) else v) for k, v in stats.__dict__.items()}), "failed" if log.failed else "ok"),
         )
 
     if stats.fetched:
@@ -394,5 +404,9 @@ def run(
             "circuit breaker",
             f"{stats.hosts_tripped} host(s) cooled after repeated failures",
         )
-    log.ok("classification", "deferred to v1.F — evidence stored for offline judging")
+    if stats.verdicts:
+        log.note("")
+        log.note("verdicts:")
+        for name, count in stats.verdicts.most_common():
+            log.progress(f"{name:<26} {count:>6,}")
     return stats

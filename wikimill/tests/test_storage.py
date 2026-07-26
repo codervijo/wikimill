@@ -18,6 +18,7 @@ EXPECTED_TABLES = {
     "external_links",
     "robots_cache",
     "url_checks",
+    "url_classifications",
     "urls",
     "wiki_pages",
 }
@@ -69,6 +70,41 @@ def test_counts_starts_empty(tmp_path):
     with open_db(tmp_path / "w.db") as conn:
         assert set(counts(conn)) == EXPECTED_TABLES
         assert all(v == 0 for v in counts(conn).values())
+
+
+def test_verdicts_live_outside_the_observation_table(tmp_path):
+    """§20 forbids UPDATE-ing url_checks, and re-judging stored evidence is the
+    point of the design — so verdicts moved to their own append-only table."""
+    with open_db(tmp_path / "w.db") as conn:
+        check_cols = {r["name"] for r in conn.execute("PRAGMA table_info(url_checks)")}
+        assert "classification" not in check_cols
+        assert "classifier_version" not in check_cols
+        cls_cols = {
+            r["name"] for r in conn.execute("PRAGMA table_info(url_classifications)")
+        }
+        assert {"check_id", "classification", "classifier_version", "reasons"} <= cls_cols
+
+
+def test_reclassification_appends_rather_than_overwrites(tmp_path):
+    """A new classifier version adds a verdict; the old one stays on record so a
+    rule change is auditable."""
+    with open_db(tmp_path / "w.db") as conn:
+        conn.execute(
+            "INSERT INTO url_checks (url_hash, checked_at) VALUES ('h','2026-07-25T00:00:00+00:00')"
+        )
+        cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for version, value in ((1, "live"), (2, "parked")):
+            conn.execute(
+                "INSERT INTO url_classifications (check_id, url_hash, classified_at, "
+                "classifier_version, classification) VALUES (?,?,?,?,?)",
+                (cid, "h", "2026-07-25T00:00:00+00:00", version, value),
+            )
+        rows = conn.execute(
+            "SELECT classification FROM url_classifications WHERE check_id=? "
+            "ORDER BY classifier_version",
+            (cid,),
+        ).fetchall()
+        assert [r["classification"] for r in rows] == ["live", "parked"]
 
 
 def test_private_suffix_column_renamed(tmp_path):

@@ -219,6 +219,43 @@ MIGRATION_2: Final[tuple[str, ...]] = (
     "ALTER TABLE domains RENAME COLUMN is_user_content_suffix TO is_private_suffix",
 )
 
-MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (MIGRATION_1, MIGRATION_2)
+# v1.F. The PRD put `classification` on `url_checks`, but §20 forbids ever
+# UPDATE-ing that table — and re-judging stored evidence with an improved
+# classifier is the entire point of the design. Those two cannot both hold.
+#
+# Resolved in favour of the invariant: `url_checks` stays a pure, immutable
+# record of what was *observed*, and verdicts move to their own append-only
+# table keyed by (check, classifier_version). Re-classification appends rather
+# than overwrites, which also makes classifier disagreement auditable — you can
+# see exactly which verdicts a rule change flipped, and when.
+MIGRATION_3: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE url_classifications (
+        id                 INTEGER PRIMARY KEY,
+        check_id           INTEGER NOT NULL REFERENCES url_checks(id),
+        url_hash           TEXT    NOT NULL,
+        classified_at      TEXT    NOT NULL,
+        classifier_version INTEGER NOT NULL,
+        classification     TEXT    NOT NULL,
+        reasons            TEXT,
+        -- Kept so a later rule change can be evaluated against the evidence
+        -- that produced a borderline call, not just its outcome.
+        confidence         REAL,
+        UNIQUE (check_id, classifier_version)
+    )
+    """,
+    "CREATE INDEX idx_url_class_url ON url_classifications(url_hash, classified_at)",
+    "CREATE INDEX idx_url_class_value ON url_classifications(classification)",
+    # The observation table no longer carries a verdict.
+    "ALTER TABLE url_checks DROP COLUMN classification",
+    "ALTER TABLE url_checks DROP COLUMN classifier_version",
+    "ALTER TABLE url_checks DROP COLUMN classifier_reasons",
+)
+
+MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
+    MIGRATION_1,
+    MIGRATION_2,
+    MIGRATION_3,
+)
 
 LATEST_VERSION: Final = len(MIGRATIONS)

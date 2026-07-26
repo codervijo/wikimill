@@ -17,6 +17,7 @@ import typer
 
 from . import __version__
 from . import ingest as ingest_stage
+from .classify import runner as classify_stage
 from .crawl import runner as crawl_stage
 from .config import load as load_config
 from .constants import EXIT_INTERRUPTED, EXIT_OK, RunKind
@@ -224,11 +225,22 @@ def crawl(
     force: Annotated[
         bool, typer.Option("--force", help="Re-check terminal/not-yet-due records.")
     ] = False,
+    reclassify: Annotated[
+        bool,
+        typer.Option(
+            "--reclassify",
+            help="Re-judge stored evidence with the current classifier. "
+                 "Makes no network requests at all.",
+        ),
+    ] = False,
 ) -> None:
     """Crawl pending and due URLs, honouring robots.txt and per-host politeness."""
     cfg = load_config()
     with RunLog(RunKind.CRAWL, cfg.logs_dir) as log:
         gate(cfg, log)
+        if reclassify:
+            classify_stage.run(cfg, log, limit=limit, force=force)
+            return
         crawl_stage.run(cfg, log, limit=limit, concurrency=concurrency, force=force)
 
 
