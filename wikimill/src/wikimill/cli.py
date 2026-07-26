@@ -20,6 +20,7 @@ from . import ingest as ingest_stage
 from .classify import runner as classify_stage
 from .crawl import runner as crawl_stage
 from .domain import runner as domain_stage
+from .enrich import runner as enrich_stage
 from .config import load as load_config
 from .constants import EXIT_INTERRUPTED, EXIT_OK, RunKind
 from .errors import Interrupted, NotImplementedYetError, WikimillError
@@ -272,7 +273,10 @@ def enrich(
     ] = False,
 ) -> None:
     """Back-fill section, anchor text, and citation context for interesting links only."""
-    raise NotImplementedYetError("enrich", "v1.H")
+    cfg = load_config()
+    with RunLog(RunKind.ENRICH, cfg.logs_dir) as log:
+        gate(cfg, log)
+        enrich_stage.run(cfg, log, states=state, limit=limit, dry_run=dry_run)
 
 
 @app.command()

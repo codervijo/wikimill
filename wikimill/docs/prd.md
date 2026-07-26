@@ -2,7 +2,7 @@
 
 The canonical source of truth for purpose, scope, phases, and conformance. Code that contradicts this doc is drift, not feature.
 
-> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.G` shipped the same day; `v1.H` (enrich) is next.
+> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.H` shipped the same day; `v1.I` (inspect/stats/scoring/export) is next.
 
 ## 1. Purpose
 
@@ -140,13 +140,27 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 | v1.E | ✅ done | Crawler: robots-aware, rate-limited, redirect-tracking `httpx` fetcher → append-only `url_checks` |
 | v1.F | ✅ done | Classifier: the eleven-state vocabulary (§11) + URL state machine + bounded evidence capture |
 | v1.G | ✅ done | Domain checks: multi-resolver DNS + RDAP → `domain_checks` + domain state; `unregistered` established here |
-| v1.H | ⏳ pending | **`enrich`**: multistream index loader → **offset-sorted, block-batched** seek/decompress → `mwparserfromhell` → section, anchor, ref/cite context, dead-link tags, for the selected subset only |
+| v1.H | ✅ done | **`enrich`**: multistream index loader → **offset-sorted, block-batched** seek/decompress → `mwparserfromhell` → section, anchor, ref/cite context, dead-link tags, for the selected subset only |
 | v1.I | ⏳ pending | `inspect`, `stats`, scoring, `export` (CSV + JSONL, evidence columns, licence header) |
 | v1.J | ⏳ pending | First full bounded run + soak; measure everything §19 asks for |
 
 #### Design notes
 
-**v1.G** — ✅ shipped 2026-07-25. Domain checks: `domain/dns.py` (multi-resolver), `domain/rdap.py` (IANA bootstrap + registry query), `domain/rules.py` (the pure classifier), `domain/runner.py`. Mirrors v1.F's shape exactly — pure function, versioned verdicts, append-only `domain_classifications` (migration 4), for the same §20 reason.
+**v1.H** — ✅ shipped 2026-07-25. The expensive stage, and the one the whole pipeline is ordered to defer: `enrich/select.py` (what deserves it), `enrich/seek.py` (multistream random access), `enrich/wikitext.py` (context extraction), `enrich/runner.py`.
+
+**The empty-subset fast path was written first and tested first**, per the implementation sequence — it is the entire cheapest-first design made testable. `enrich` begins with a single indexed count; if nothing is pending it stops there, having opened neither the archive nor the index. A test asserts this by monkeypatching both `find_archive` and `read_block` to raise.
+
+**Block batching, not per-page seeking.** Candidates are ordered by `ms_offset` and grouped, so one seek and one decompression serve every candidate page sharing a block. Measured on the real 298 MB `p1p41242` part: 5 dead links across 5 blocks → **500 pages decompressed in 1.4s**, confirming the ~100-pages-per-block assumption the design rests on.
+
+`BZ2Decompressor` (not `bz2.open`) is what makes a concatenated archive addressable at all — it stops at its stream's end instead of running on into the next block. Offsets are operator-influenced and the archive is a public download, so decompression is bounded by both absolute size and expansion ratio; a wrong offset fails cleanly rather than consuming the machine.
+
+Pages are extracted from a block by regex rather than an XML parser, because a block is a **fragment with no root element** — a conforming parser rejects it outright. Safe here only because the shape is machine-generated and rigid.
+
+**Two honest outcomes are first-class, not failures:** `url_not_found_in_wikitext` (the link came from template expansion and has no literal occurrence — the link is real, only its surface context is absent) and `page_missing` (deleted or moved between dump runs). URL matching is deliberately loose on `www`/scheme/trailing slash, since the stored URL is normalized while the wikitext holds whatever an editor typed.
+
+**Verified on real data.** Five dead links enriched from the real archive with their Wikipedia context: *Foreign relations of Cambodia* → a dead German Foreign Office page (anchor "Foreign relations between Cambodia and Germany"); *B'Elanna Torres* → a dead StarTrek.com bio; *Vladimir Markovnikov* → a dead university chemistry page in a `{{cite web}}` that Wikipedia has **already replaced with a web.archive.org snapshot**; *Tru64 UNIX* → a dead Google Groups link. Re-running enriches nothing. 412 hermetic tests.
+
+**v1.G — ✅ shipped 2026-07-25. Domain checks: `domain/dns.py` (multi-resolver), `domain/rdap.py` (IANA bootstrap + registry query), `domain/rules.py` (the pure classifier), `domain/runner.py`. Mirrors v1.F's shape exactly — pure function, versioned verdicts, append-only `domain_classifications` (migration 4), for the same §20 reason.
 
 **The `unregistered` gate is deliberately hard to pass:** ≥2 independent resolvers must return NXDOMAIN **and** the authoritative registry must return an explicit 404. Either alone is insufficient, and disagreement always errs toward "registered" — a missed candidate costs nothing, a fabricated one costs the operator real money and the trust of every other row. An RDAP server that is rate-limited, erroring, or unreachable yields `unavailable`, **never** `not_found`.
 
@@ -676,7 +690,7 @@ None of these block approval; each is answerable at its phase. Q1 and Q2 are wan
 - **Q3 (v1.C) — English only for v1?** *Recommendation: yes* — enwiki only; other wikis are a v4 candidate.
 - **Q4 (v1.F) — evidence-blob default.** Store 8 KB of body for non-`live` checks? Trades disk for offline re-classification. *Recommendation: yes, 8 KB, configurable.*
 - ~~**Q5 (v1.G) — RDAP access strategy**~~ — **resolved 2026-07-25 by measurement.** IANA bootstrap (RFC 9224) cached on disk for 7 days, RFC-correct longest-label match, then a direct query to the registry's own RDAP endpoint. Measured against the live registry: **1,200 TLDs across 590 service groups** — but `.de`, `.es`, `.io`, `.ru` and `.edu` publish **no RDAP at all**, so domains under them can never be *confirmed* unregistered and are recorded `no_rdap_for_tld`. No TLD needs bespoke handling; the gap is a coverage fact to report, not a special case to code around.
-- **Q6 (v1.H) — enrichment trigger set.** Which classifications should `enrich` default to? *Recommendation:* `unregistered, for_sale, parked, dns_failure, tls_failure, soft_404, hard_404` — i.e. everything except `live`, `redirect` (same-domain), `temporarily_unavailable`, and `unclassified`. Overridable per run.
+- ~~**Q6 (v1.H) — enrichment trigger set**~~ — **resolved 2026-07-25 as recommended.** Defaults to `unregistered, for_sale, parked, dns_failure, tls_failure, soft_404, hard_404`; `live`, `redirect`, `temporarily_unavailable` and `unclassified` are excluded, because paying to extract context for a working link is exactly the work this ordering exists to avoid. Overridable with `--state`.
 - **Q7 (v1.I) — export columns.** What does a candidate row need to carry to be actionable without re-opening the tool? *Recommendation:* domain, state, last-checked, citing-page count, and one representative citation (page URL + section + anchor). Operator to confirm the set.
 - **Q8 (v4) — Wikimedia Enterprise.** Worth an account for free-tier Structured Contents (free since 2026-07-01) as an alternative enrichment path? Only re-evaluate after the local multistream path has soaked.
 

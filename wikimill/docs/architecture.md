@@ -2,7 +2,7 @@
 
 How this project is built. Mechanisms, schemas, modules, and integrations. The "HOW" companion to `docs/prd.md`'s "WHY / WHAT".
 
-Status: **v1.B–v1.G shipped** (scaffold, config, storage, preflight, launcher, SQL ingest, normalization, crawler, classifier, domain checks). Everything below marked *(vN.X)* is planned, not built.
+Status: **v1.B–v1.H shipped** (scaffold, config, storage, preflight, launcher, SQL ingest, normalization, crawler, classifier, domain checks, enrichment). Only scoring + export (v1.I) remain. Everything below marked *(vN.X)* is planned, not built.
 
 ## 1. Project layout
 
@@ -50,9 +50,13 @@ wikimill/
 │   │   ├── rdap.py            #   IANA bootstrap (RFC 9224) + registry query
 │   │   ├── rules.py           #   the unregistered gate
 │   │   └── runner.py          #   selection, pacing, single writer
-│   ├── enrich/                # (v1.H) select.py · seek.py · wikitext.py
+│   ├── enrich/                # v1.H: stage 6, the deferred expensive half
+│   │   ├── select.py          #   what deserves it — and the empty fast path
+│   │   ├── seek.py            #   offset -> one bz2 block -> pages
+│   │   ├── wikitext.py        #   section, anchor, ref/cite context
+│   │   └── runner.py          #   block batching, single writer
 │   └── export.py              # (v1.I) scoring + candidate file
-├── tests/                     # 381 tests, hermetic (no network, no Docker)
+├── tests/                     # 412 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -95,6 +99,11 @@ Two consequences:
 
 - The index also supplies `page_id → title`, so **`page.sql.gz` (2.4 GB) is not needed at all**.
 - `enrich` **sorts candidates by `ms_offset` and batches by block**, so one seek and one decompress serves every candidate sharing a stream. On an SSD this is a minor win; on a spinning external HDD — an expected deployment — it is the difference between minutes and hours.
+- Measured on the real 298 MB `p1p41242` part: 5 candidates across 5 blocks →
+  **500 pages decompressed in 1.4 s**, confirming ~100 pages per block.
+- `BZ2Decompressor`, not `bz2.open`: it stops at its stream's end instead of
+  running on into the following blocks, which is what makes a concatenated
+  archive addressable at all.
 
 ## 4. Reading the externallinks dump
 
@@ -296,13 +305,14 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 13. Testing
 
-381 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+412 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness
 - `test_preflight.py` — per-check markers, the gate, "every ✗ names a fix"
 - `test_cli.py` — command surface, exit codes, stubs naming their phase
 - `test_logging.py` — markers, JSONL, stderr/stdout split, colour suppression
+- `test_enrich.py` — the empty fast path (criterion 12), block seeking, wikitext
 - `test_domain.py` — resolver reconciliation, RDAP bootstrap, the unregistered gate
 - `test_classify.py` — the eleven states, marker restraint, state machine
 - `test_crawl.py` — SSRF guards, robots.txt, fetcher, politeness (MockTransport + fake resolver)
