@@ -252,10 +252,36 @@ MIGRATION_3: Final[tuple[str, ...]] = (
     "ALTER TABLE url_checks DROP COLUMN classifier_reasons",
 )
 
+# v1.G. The same conflict MIGRATION_3 resolved for URLs applies to domains:
+# §20 forbids UPDATE-ing `domain_checks`, so a verdict column there could never
+# be revised. Same resolution, for the same reason — symmetry here is not
+# tidiness, it is what lets `--reclassify` work uniformly across both halves of
+# the pipeline.
+MIGRATION_4: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE domain_classifications (
+        id                 INTEGER PRIMARY KEY,
+        check_id           INTEGER NOT NULL REFERENCES domain_checks(id),
+        domain_id          INTEGER NOT NULL,
+        classified_at      TEXT    NOT NULL,
+        classifier_version INTEGER NOT NULL,
+        state              TEXT    NOT NULL,
+        reasons            TEXT,
+        confidence         REAL,
+        UNIQUE (check_id, classifier_version)
+    )
+    """,
+    "CREATE INDEX idx_domain_class_domain ON domain_classifications(domain_id, classified_at)",
+    "CREATE INDEX idx_domain_class_state ON domain_classifications(state)",
+    "ALTER TABLE domain_checks DROP COLUMN classification",
+    "ALTER TABLE domain_checks DROP COLUMN classifier_version",
+)
+
 MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_1,
     MIGRATION_2,
     MIGRATION_3,
+    MIGRATION_4,
 )
 
 LATEST_VERSION: Final = len(MIGRATIONS)

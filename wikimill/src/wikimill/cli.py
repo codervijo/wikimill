@@ -19,6 +19,7 @@ from . import __version__
 from . import ingest as ingest_stage
 from .classify import runner as classify_stage
 from .crawl import runner as crawl_stage
+from .domain import runner as domain_stage
 from .config import load as load_config
 from .constants import EXIT_INTERRUPTED, EXIT_OK, RunKind
 from .errors import Interrupted, NotImplementedYetError, WikimillError
@@ -252,8 +253,11 @@ def check(
     ] = None,
     force: Annotated[bool, typer.Option("--force", help="Ignore recheck windows.")] = False,
 ) -> None:
-    """Run DNS + RDAP against due domains; establish `unregistered`."""
-    raise NotImplementedYetError("check", "v1.G")
+    """Run DNS + RDAP against due domains; the only place `unregistered` is set."""
+    cfg = load_config()
+    with RunLog(RunKind.CHECK, cfg.logs_dir) as log:
+        gate(cfg, log)
+        domain_stage.run(cfg, log, limit=limit, states=state, force=force)
 
 
 @app.command()

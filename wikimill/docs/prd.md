@@ -2,7 +2,7 @@
 
 The canonical source of truth for purpose, scope, phases, and conformance. Code that contradicts this doc is drift, not feature.
 
-> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.F` shipped the same day; `v1.G` (domain checks) is next.
+> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. `v1.B`–`v1.G` shipped the same day; `v1.H` (enrich) is next.
 
 ## 1. Purpose
 
@@ -139,14 +139,29 @@ The whole path on one page-ID slice: SQL link set → normalize → crawl → cl
 | v1.D | ✅ done | Normalization + dedup (§10) → `urls` + `domains`; archive-URL unwrapping; scheme / internal-domain / resolver filtering |
 | v1.E | ✅ done | Crawler: robots-aware, rate-limited, redirect-tracking `httpx` fetcher → append-only `url_checks` |
 | v1.F | ✅ done | Classifier: the eleven-state vocabulary (§11) + URL state machine + bounded evidence capture |
-| v1.G | ⏳ pending | Domain checks: multi-resolver DNS + RDAP → `domain_checks` + domain state; `unregistered` established here |
+| v1.G | ✅ done | Domain checks: multi-resolver DNS + RDAP → `domain_checks` + domain state; `unregistered` established here |
 | v1.H | ⏳ pending | **`enrich`**: multistream index loader → **offset-sorted, block-batched** seek/decompress → `mwparserfromhell` → section, anchor, ref/cite context, dead-link tags, for the selected subset only |
 | v1.I | ⏳ pending | `inspect`, `stats`, scoring, `export` (CSV + JSONL, evidence columns, licence header) |
 | v1.J | ⏳ pending | First full bounded run + soak; measure everything §19 asks for |
 
 #### Design notes
 
-**v1.F** — ✅ shipped 2026-07-25. The classifier: `classify/signals.py` (marker vocabularies), `classify/rules.py` (the pure function), `classify/state.py` (state machine + cadences), `classify/runner.py` (offline re-classification). Runs inline inside `crawl`, and re-runnable via `crawl --reclassify` — no new verb, since classify is a sub-step of crawl in the stage contract.
+**v1.G** — ✅ shipped 2026-07-25. Domain checks: `domain/dns.py` (multi-resolver), `domain/rdap.py` (IANA bootstrap + registry query), `domain/rules.py` (the pure classifier), `domain/runner.py`. Mirrors v1.F's shape exactly — pure function, versioned verdicts, append-only `domain_classifications` (migration 4), for the same §20 reason.
+
+**The `unregistered` gate is deliberately hard to pass:** ≥2 independent resolvers must return NXDOMAIN **and** the authoritative registry must return an explicit 404. Either alone is insufficient, and disagreement always errs toward "registered" — a missed candidate costs nothing, a fabricated one costs the operator real money and the trust of every other row. An RDAP server that is rate-limited, erroring, or unreachable yields `unavailable`, **never** `not_found`.
+
+**RDAP coverage is a reported fact, not a workaround.** Measured against the live IANA bootstrap: 1,200 TLDs / 590 groups, with `.de`, `.es`, `.io`, `.ru` and `.edu` absent entirely. A domain there that NXDOMAINs is recorded `no_rdap_for_tld` — DNS says gone, nothing authoritative can confirm it, and claiming availability would be a guess dressed as a fact.
+
+Two bugs found during the build, both of which would have failed silently:
+
+1. **The bootstrap matched the shortest TLD suffix instead of the longest**, sending `bbc.co.uk` to the `.uk` registry rather than `.co.uk` — with plausible-looking answers. RFC 9224 requires longest-label match; fixed, and verified live (`bbc.co.uk` now reaches Nominet's `couk` endpoint).
+2. **`confirmed_nxdomain` counted NXDOMAIN votes without checking for disagreement**, so a domain could be "confirmed gone" while another resolver was resolving it happily — the exact path to a fabricated available domain.
+
+Parking is **lifted from URL verdicts rather than re-derived** (the crawler already saw the page), and requires a majority so one parked URL cannot condemn a healthy domain. `expiring` outranks it: a registration winding down is more actionable than a parking page.
+
+**Verified on real data:** 12 domains — 11 `active`, 1 `expiring`, and 5 `.edu` honestly reported as unverifiable. The expiring find is real: **`georgehart.com`, expires 2026-08-15** (21 days out, registrar Tucows), cited by Wikipedia. 381 hermetic tests.
+
+**v1.F — ✅ shipped 2026-07-25. The classifier: `classify/signals.py` (marker vocabularies), `classify/rules.py` (the pure function), `classify/state.py` (state machine + cadences), `classify/runner.py` (offline re-classification). Runs inline inside `crawl`, and re-runnable via `crawl --reclassify` — no new verb, since classify is a sub-step of crawl in the stage contract.
 
 **A spec conflict this phase had to resolve.** §9 put `classification` on `url_checks`; §20 forbids ever `UPDATE`-ing that table; and re-judging stored evidence is the whole design. All three cannot hold. Resolved in favour of the invariant: verdicts moved to an append-only `url_classifications` table (migration 3), and the three verdict columns were dropped from `url_checks`. Re-classification now appends, so a rule change is auditable rather than destructive. §9 is corrected above.
 
@@ -328,8 +343,13 @@ Unique: `(check_id, classifier_version)`.
 
 *Why a separate table:* §20 forbids ever `UPDATE`-ing `url_checks`, and re-judging stored evidence with an improved classifier is the point of the design — the two cannot both hold with a verdict column on the observation. Verdicts moved out, so `url_checks` stays a pure immutable record of what was *observed*, and re-classification appends. That also makes classifier disagreement auditable: you can see exactly which verdicts a rule change flipped, and when.
 
+**`domain_classifications`** — **append-only verdicts** (added v1.G, migration 4).
+`id PK` · `check_id ✱ →domain_checks` · `domain_id ✱` · `classified_at` · `classifier_version` · `state ✱` · `reasons` (JSON) · `confidence`
+
+*Same resolution as `url_classifications`, for the same reason:* §20 forbids `UPDATE`-ing `domain_checks`, so a verdict column there could never be revised. The symmetry is not tidiness — it is what lets re-classification work uniformly across both halves of the pipeline.
+
 **`domain_checks`** — **append-only.**
-`id PK` · `domain_id ✱` · `checked_at ✱` · `dns_status` (`ok` | `nxdomain` | `servfail` | `timeout` | `no_records`) · `a_records` (JSON) · `ns_records` (JSON) · `resolvers_agreed` (bool) · `rdap_status` (`registered` | `not_found` | `unavailable` | `no_rdap_for_tld`) · `rdap_raw` (JSON, bounded) · `registrar` · `registration_expiry` · `domain_statuses` (JSON — EPP codes: `clientHold`, `pendingDelete`, `redemptionPeriod`, …) · `classification` · `classifier_version` · `latency_ms` · `error_kind`
+`id PK` · `domain_id ✱` · `checked_at ✱` · `dns_status` (`ok` | `nxdomain` | `servfail` | `timeout` | `no_records`) · `a_records` (JSON) · `ns_records` (JSON) · `resolvers_agreed` (bool) · `rdap_status` (`registered` | `not_found` | `unavailable` | `no_rdap_for_tld`) · `rdap_raw` (JSON, bounded) · `registrar` · `registration_expiry` · `domain_statuses` (JSON — EPP codes: `clientHold`, `pendingDelete`, `redemptionPeriod`, …) · `latency_ms` · `error_kind`
 
 **`robots_cache`** — `origin PK` · `fetched_at` · `expires_at` · `http_status` · `body` · `crawl_delay`
 
@@ -655,7 +675,7 @@ None of these block approval; each is answerable at its phase. Q1 and Q2 are wan
 - **Q2 (v1.B) — crawler identity.** The exact `WIKIMILL_USER_AGENT` / `WIKIMILL_CONTACT` values. The mechanism is settled (§15 — `wikimill.env`); only the values are outstanding. Operator must supply: this is a public identity, and the Wikimedia UA policy requires real contact info.
 - **Q3 (v1.C) — English only for v1?** *Recommendation: yes* — enwiki only; other wikis are a v4 candidate.
 - **Q4 (v1.F) — evidence-blob default.** Store 8 KB of body for non-`live` checks? Trades disk for offline re-classification. *Recommendation: yes, 8 KB, configurable.*
-- **Q5 (v1.G) — RDAP access strategy.** IANA bootstrap + direct registry RDAP, with what per-registry rate policy? Any TLD needing special handling?
+- ~~**Q5 (v1.G) — RDAP access strategy**~~ — **resolved 2026-07-25 by measurement.** IANA bootstrap (RFC 9224) cached on disk for 7 days, RFC-correct longest-label match, then a direct query to the registry's own RDAP endpoint. Measured against the live registry: **1,200 TLDs across 590 service groups** — but `.de`, `.es`, `.io`, `.ru` and `.edu` publish **no RDAP at all**, so domains under them can never be *confirmed* unregistered and are recorded `no_rdap_for_tld`. No TLD needs bespoke handling; the gap is a coverage fact to report, not a special case to code around.
 - **Q6 (v1.H) — enrichment trigger set.** Which classifications should `enrich` default to? *Recommendation:* `unregistered, for_sale, parked, dns_failure, tls_failure, soft_404, hard_404` — i.e. everything except `live`, `redirect` (same-domain), `temporarily_unavailable`, and `unclassified`. Overridable per run.
 - **Q7 (v1.I) — export columns.** What does a candidate row need to carry to be actionable without re-opening the tool? *Recommendation:* domain, state, last-checked, citing-page count, and one representative citation (page URL + section + anchor). Operator to confirm the set.
 - **Q8 (v4) — Wikimedia Enterprise.** Worth an account for free-tier Structured Contents (free since 2026-07-01) as an alternative enrichment path? Only re-evaluate after the local multistream path has soaked.

@@ -13,6 +13,7 @@ from wikimill.errors import StorageError
 EXPECTED_TABLES = {
     "crawl_runs",
     "domain_checks",
+    "domain_classifications",
     "domains",
     "exports",
     "external_links",

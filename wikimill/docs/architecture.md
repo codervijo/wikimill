@@ -2,7 +2,7 @@
 
 How this project is built. Mechanisms, schemas, modules, and integrations. The "HOW" companion to `docs/prd.md`'s "WHY / WHAT".
 
-Status: **v1.B–v1.F shipped** (scaffold, config, storage, preflight, launcher, SQL ingest, normalization, crawler, classifier). Everything below marked *(vN.X)* is planned, not built.
+Status: **v1.B–v1.G shipped** (scaffold, config, storage, preflight, launcher, SQL ingest, normalization, crawler, classifier, domain checks). Everything below marked *(vN.X)* is planned, not built.
 
 ## 1. Project layout
 
@@ -45,10 +45,14 @@ wikimill/
 │   │   ├── rules.py           #   Observation -> Verdict
 │   │   ├── state.py           #   state machine, cadences, terminality
 │   │   └── runner.py          #   offline re-classification (no network)
-│   ├── domain/                # (v1.G) dns.py · rdap.py
+│   ├── domain/                # v1.G: stage 5, DNS + RDAP
+│   │   ├── dns.py             #   multi-resolver; NXDOMAIN needs corroboration
+│   │   ├── rdap.py            #   IANA bootstrap (RFC 9224) + registry query
+│   │   ├── rules.py           #   the unregistered gate
+│   │   └── runner.py          #   selection, pacing, single writer
 │   ├── enrich/                # (v1.H) select.py · seek.py · wikitext.py
 │   └── export.py              # (v1.I) scoring + candidate file
-├── tests/                     # 347 tests, hermetic (no network, no Docker)
+├── tests/                     # 381 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -191,7 +195,32 @@ is never terminal** (it is the *most* urgent recheck — anyone can register the
 domain tomorrow), and **`hard_404` does not kill the domain** (only domain checks
 may set a domain state).
 
-## 7. Storage
+## 7. Domain checks
+
+Stage 5, and the **only** place `unregistered` can be set.
+
+**The gate is deliberately hard to pass:** ≥2 independent resolvers must return
+NXDOMAIN *and* the authoritative registry must return an explicit 404. Either
+alone is insufficient, and any disagreement errs toward "registered" — a missed
+candidate costs nothing, a fabricated one costs real money. An RDAP server that
+is rate-limited or unreachable yields `unavailable`, **never** `not_found`.
+
+**RDAP coverage is reported, not worked around.** The IANA bootstrap (RFC 9224,
+cached 7 days, longest-label match) maps 1,200 TLDs across 590 service groups —
+but `.de`, `.es`, `.io`, `.ru` and `.edu` publish none. A domain there that
+NXDOMAINs is `no_rdap_for_tld`: DNS says gone, nothing authoritative can confirm
+it, and claiming availability would be a guess dressed as a fact.
+
+Parking is **lifted from URL verdicts** rather than re-derived — the crawler
+already saw the page — and needs a majority, so one parked URL cannot condemn a
+healthy domain. `expiring` outranks it: a registration winding down is more
+actionable than a parking page.
+
+Verdicts live in append-only `domain_classifications`, mirroring
+`url_classifications` (§6) for the same reason. WHOIS is never used and
+registrar pages are never scraped.
+
+## 8. Storage
 
 SQLite, single file, WAL, at `state/wikimill.db`. Ten tables (schema in `storage/schema.py`, documented in `prd.md` §9).
 
@@ -202,7 +231,7 @@ SQLite, single file, WAL, at `state/wikimill.db`. Ten tables (schema in `storage
 - **Migrations are forward-only** and applied in a single transaction, so a failure leaves the previous version intact rather than a half-migrated database. A database from a *newer* build is refused rather than silently downgraded.
 - **`urls.normalizer_version`** records which ruleset produced each `url_hash`. Changing a normalization rule changes the hash; without this column that would silently fork identity across the table.
 
-## 8. Configuration
+## 9. Configuration
 
 All configuration is environment variables, sourced from a mounted `wikimill.env`. Precedence: **process environment > `wikimill.env` > built-in default.**
 
@@ -219,7 +248,7 @@ The launcher forwards every other host `WIKIMILL_*` variable with `-e` *after* `
 
 **Secrets.** None are needed at v1, but the whole path is built: gitignored `wikimill.env`, committed `.example` with no real values, and redaction of any variable matching `*_KEY|*_TOKEN|*_SECRET|*_PASSWORD` across `preflight`, `--json`, logs, and `crawl_runs.args`. Retrofitting this around a key that has already been committed once is far more expensive.
 
-## 9. Preflight
+## 10. Preflight
 
 A registry of small check functions, each returning a `CheckResult(marker, step, detail, remediation)`. Runs before every state-touching command and aborts on ✗ before any work, network request, or dump read.
 
@@ -232,7 +261,7 @@ Two decisions worth knowing:
 
 Checksums are cached as `(path, size, mtime, sha256)` and re-hashed only when size or mtime changes — verifying 32 GB over USB on every command would otherwise dominate runtime. `--verify-dumps` forces a full re-hash.
 
-## 10. Output contract
+## 11. Output contract
 
 - **Every step ends in exactly one marker**, including boring ones — the consistency is what makes a long log scannable. `✓` succeeded or already-correct · `↷` skipped/transient (retry helps) · `✗` permanent (operator must act).
 - **Markers go to stderr**, so stdout stays clean for `--json` and file output.
@@ -245,7 +274,7 @@ Checksums are cached as `(path, size, mtime, sha256)` and re-hashed only when si
 
 Note: Typer's `no_args_is_help` is deliberately unused — Click implements it by exiting **2**, which would collide with the preflight-failure code. The root callback prints help and exits 0 instead.
 
-## 11. Runtime
+## 12. Runtime
 
 Two paths, one Dockerfile. Crawlers run inside Docker, never on the host; `bin/wikimill` and `bin/install` are the only host-side code, they are bash, and they execute no Python.
 
@@ -265,15 +294,16 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 **Two different dry-runs, deliberately distinguished.** `WIKIMILL_DRY_RUN` is *launcher-level*: print the docker invocation and every mount, start nothing — which is also what makes the launcher testable with no Docker present. `ingest --dry-run` / `enrich --dry-run` are *command-level*: the container starts and reports what work it would do.
 
-## 12. Testing
+## 13. Testing
 
-347 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+381 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness
 - `test_preflight.py` — per-check markers, the gate, "every ✗ names a fix"
 - `test_cli.py` — command surface, exit codes, stubs naming their phase
 - `test_logging.py` — markers, JSONL, stderr/stdout split, colour suppression
+- `test_domain.py` — resolver reconciliation, RDAP bootstrap, the unregistered gate
 - `test_classify.py` — the eleven states, marker restraint, state machine
 - `test_crawl.py` — SSRF guards, robots.txt, fetcher, politeness (MockTransport + fake resolver)
 - `test_normalize.py` — canonicalization, archive unwrapping, PSL, filtering
@@ -282,7 +312,7 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 **Suite-green is not feature-proven.** These verify code correctness. The acceptance criteria that matter (`prd.md` §19) need a real dump and a real crawl.
 
-## 13. Tracked refactors
+## 14. Tracked refactors
 
 Logged as they arise, per house convention.
 
