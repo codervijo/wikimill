@@ -258,24 +258,44 @@ Two decisions were forced during the build, recorded because they are easy to re
 1. **Typer's `no_args_is_help` exits 2**, which collides with our own exit-code contract (2 = preflight failure) — `wikimill || handle_preflight_failure` would misfire. The root callback prints help and exits 0 instead.
 2. **The launcher must forward host `WIKIMILL_*` variables with `-e` *after* `--env-file`.** Without it the documented precedence silently fails for every application-layer variable — caught in soak, when an inline `WIKIMILL_CONTACT=…` override stopped at the host and never reached the container.
 
-### v2 — Recheck & coverage
+### v2 — Configuration, recheck & coverage
+
+Adds the **policy configuration file** the CLI design always specified but v1 never built, then the recheck and coverage work. Config comes first in the tier because every later phase — and the v1.J soak before it — wants to tune thresholds without editing Python.
 
 | Phase | Status | Title |
 |---|---|---|
-| v2.A | ⏳ planned | Plan the tier |
-| v2.B | ⏳ planned | Recheck scheduler (§12): `next_check_at`, tiered cadences, `--due` selection, terminal-record protection |
-| v2.C | ⏳ planned | `exturlusage` verification pass before export ("does enwiki still link here?") |
-| v2.D | ⏳ planned | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
-| v2.E | ⏳ planned | Enrichment cache: keep decompressed blocks warm across runs when re-enriching a new dump run |
+| v2.A | ⏳ planned | Plan the tier: `wikimill.toml` schema, precedence against env vars, which constants become policy vs. stay code |
+| v2.B | ⏳ planned | **`wikimill.toml` policy config**: loader, validation with typed errors, `config show` / `config validate`, `.example` file, precedence `CLI flag > env > wikimill.toml > built-in default` |
+| v2.C | ⏳ planned | **Move the policy constants into it**: export candidate states, `--min-pages` floor, scoring weights (§ `score.py`), enrichment trigger sets, recheck cadences, expiry watch window, per-host delay and concurrency |
+| v2.D | ⏳ planned | **Operator-editable marker lists**: parking/for-sale/soft-404 signatures, tracking-parameter list, Wikimedia + resolver exclusion lists — with a `CLASSIFIER_VERSION` bump on change so verdicts stay auditable |
+| v2.E | ⏳ planned | Recheck scheduler (§12): `next_check_at`, tiered cadences, `--due` selection, terminal-record protection |
+| v2.F | ⏳ planned | `exturlusage` verification pass before export ("does enwiki still link here?") |
+| v2.G | ⏳ planned | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
+| v2.H | ⏳ planned | Enrichment cache: keep decompressed blocks warm across runs when re-enriching a new dump run |
 
-### v3 — Scale
+**Why config is a tier, not a chore.** Every threshold in v1 is a judgement call of mine, not a measured value: `unregistered` scoring +50, citations capped at +30, `is_private_suffix` at −15, the 60-day expiry watch, the parking marker lists. The v1.J soak exists to challenge those, and challenging them currently means editing Python and rebuilding. Until they are config, "tune it and re-run" is not a thing the operator can actually do.
+
+**Resolves a documented drift.** §15 states config lives in `wikimill.toml`; v1 shipped env-var configuration only, and left policy hardcoded. v2.B/v2.C close that. Operational settings (`WIKIMILL_CONTACT`, dumps dir, resolvers) stay in `wikimill.env` — a secret does not belong in a checked-in toml — so the split is deliberate: **`.env` for credentials and environment, `.toml` for policy**.
+
+### v3 — Reporting & scale
+
+Adds a **self-contained HTML report** — a local, offline file in the spirit of the pipeline page that made this project legible — then the scale work.
 
 | Phase | Status | Title |
 |---|---|---|
-| v3.A | ⏳ planned | Plan the tier — informed by v1.J's measured numbers |
-| v3.B | ⏳ planned | Full-enwiki SQL ingest; measure ingest time, DB size, row counts, URL/domain cardinality |
-| v3.C | ⏳ planned | Storage decision point: does SQLite hold, or is Postgres warranted? Evidence-driven, ADR-recorded |
-| v3.D | ⏳ planned | Crawl throughput tuning within the politeness envelope |
+| v3.A | ⏳ planned | Plan the tier: report shape and surface (see below), informed by v1.J's measured numbers |
+| v3.B | ⏳ planned | **HTML report**: one self-contained file, no network, no CDN — inline CSS, no external fonts or scripts. Candidate table with **clickable Wikipedia citations** (deep-linked to `#Section`), score breakdown per candidate, the state distribution, and run provenance (dump run, slice, counts, generated-at) |
+| v3.C | ⏳ planned | **Pipeline/status view** in the same file: stages built, corpus funnel, measured throughput — the operator-facing version of the planning artifact, generated from the database rather than hand-written |
+| v3.D | ⏳ planned | Full-enwiki SQL ingest; measure ingest time, DB size, row counts, URL/domain cardinality |
+| v3.E | ⏳ planned | Storage decision point: does SQLite hold, or is Postgres warranted? Evidence-driven, ADR-recorded |
+| v3.F | ⏳ planned | Crawl throughput tuning within the politeness envelope |
+
+**Open decision for `v3.A` — surface.** Two candidates, deliberately not settled here:
+
+- **`export --format html`** — a third format alongside csv/jsonl. Adds no verb, and fits "keep the CLI small"; but the page wanted is more than a candidate list.
+- **`report` command** — a tenth verb producing the fuller dashboard (funnel, stage status, distributions). Honest about being a different artefact from an export, at the cost of surface area.
+
+**Constraints already known.** The file must be self-contained and open offline from `outputs/` — no CDN, no webfonts, no analytics. It carries the same CC BY-SA header and per-row attribution as the CSV, because anchor text and section names are Wikipedia excerpts either way (§17). And it must be **deterministic in its data** like the CSV, so two reports diff meaningfully; the generated-at stamp stays outside the hashed content.
 
 ### v4+ — candidate tiers (not committed)
 
@@ -527,7 +547,9 @@ Rationale: single-writer local tool, zero-ops, transactional, trivially backed u
 
 ## 15. CLI command design
 
-Flat, eight commands, no nested subcommands. Typer, `wikimill <verb>`. Config lives in a `wikimill.toml` file, not in flags — flags are for *this run*, config is for *policy*.
+Flat, nine commands, no nested subcommands. Typer, `wikimill <verb>`.
+
+**Configuration, as actually built at v1:** operational settings come from a mounted `wikimill.env` (§ Configuration below), and **policy — candidate states, scoring weights, trigger sets, marker lists — is compiled-in constants**, overridable per run only via `--state`. This section previously claimed policy lived in a `wikimill.toml`; it did not, and that drift is called out rather than quietly corrected. **`wikimill.toml` lands at v2.B/v2.C**, with the split being `.env` for credentials and environment, `.toml` for policy. Flags remain for *this run*; config is for *policy*.
 
 ### Invocation — the host launcher
 
