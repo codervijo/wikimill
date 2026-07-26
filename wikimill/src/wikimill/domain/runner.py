@@ -5,16 +5,25 @@ the interesting ones are those whose URL-level evidence already suggests trouble
 (`dns_failure`, `tls_failure`, `hard_404`, `soft_404`, `parked`, `for_sale`), or
 whose recheck window has opened. `--state` overrides, `--force` ignores windows.
 
-Like the crawler, this stage keeps one writer on the main thread; unlike it,
-work is paced per **RDAP registry** rather than per target host, because that is
-the shared resource being consumed.
+Like the crawler, this stage keeps one writer on the main thread. Unlike it, the
+two lookups consume different resources and so get different treatment:
+
+* **DNS** goes to public resolvers built for enormous volume, so it runs at full
+  worker concurrency.
+* **RDAP** goes to individual registries that publish real rate limits, so each
+  registry gets a small bounded pool — not a worker, a *semaphore*. The crawler's
+  trick of partitioning by the shared resource does not work here: `.com` alone
+  is 41% of a tail sweep, so one partition would hold nearly half the work and
+  cap the speedup at ~2.5x however many workers were added.
 """
 
 from __future__ import annotations
 
 import json
+import queue
 import sqlite3
-from collections import Counter
+import threading
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -36,6 +45,15 @@ INTERESTING_URL_STATES = (
     UrlState.PARKED,
     UrlState.FOR_SALE,
 )
+
+# Concurrent RDAP requests permitted to any ONE registry. Deliberately small:
+# registries publish rate limits and a sweep can be 100k domains. DNS is not
+# bounded this way — public resolvers are built for the volume.
+RDAP_CONCURRENCY_PER_REGISTRY = 4
+
+# Results per commit, so a long sweep survives a crash. Same reasoning as the
+# crawler: re-running costs real requests to registries.
+CHECKPOINT_EVERY = 50
 
 RECHECK_DAYS = {
     DomainState.UNREGISTERED: 3,
@@ -213,13 +231,17 @@ def run(
     limit: int | None = None,
     states: str | None = None,
     force: bool = False,
+    concurrency: int | None = None,
 ) -> CheckStats:
     """Execute the domain-check stage."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from ..crawl.fetcher import build_client
 
     stats = CheckStats()
     wanted = [s.strip() for s in states.split(",")] if states else None
     resolvers = cfg.dns_resolvers
+    workers = max(1, concurrency or cfg.concurrency)
 
     if len(resolvers) < 2:
         log.fail(
@@ -249,19 +271,71 @@ def run(
                 log.warn("rdap", "bootstrap registry unavailable — DNS only this run")
             else:
                 log.ok("rdap", f"IANA bootstrap: {len(bootstrap):,} TLDs")
+            log.ok(
+                "concurrency",
+                f"{workers} workers · max {RDAP_CONCURRENCY_PER_REGISTRY} "
+                "concurrent RDAP requests per registry",
+            )
+
+            # One semaphore per registry endpoint, created on demand. Guards the
+            # registry, not the worker, so `.com` cannot be hammered while the
+            # long tail of 1,500 other suffixes proceeds freely.
+            gates: dict[str, threading.Semaphore] = defaultdict(
+                lambda: threading.Semaphore(RDAP_CONCURRENCY_PER_REGISTRY)
+            )
+            gates_lock = threading.Lock()
+            out: queue.Queue = queue.Queue()
+
+            def probe(target: _Target) -> None:
+                """DNS + RDAP for one domain. Touches no database."""
+                try:
+                    dns_result = dns_mod.lookup(target.domain, resolvers)
+                    base = bootstrap.base_url(target.domain) if bootstrap else None
+                    if base is None:
+                        rdap_result = rdap_mod.query(target.domain, bootstrap, fetch)
+                    else:
+                        with gates_lock:
+                            gate = gates[base]
+                        with gate:
+                            rdap_result = rdap_mod.query(target.domain, bootstrap, fetch)
+                    out.put((target, dns_result, rdap_result, None))
+                except Exception as exc:  # noqa: BLE001 — must never escape unreported
+                    # A worker that dies silently would leave the collector
+                    # waiting forever for a result that is never coming.
+                    out.put((target, None, None, exc))
 
             conn.execute("BEGIN")
-            for index, target in enumerate(targets, 1):
-                dns_result = dns_mod.lookup(target.domain, resolvers)
-                rdap_result = rdap_mod.query(target.domain, bootstrap, fetch)
-                verdict = classify(
-                    dns_result,
-                    rdap_result,
-                    url_states=url_state_tally(conn, target.domain_id),
-                )
-                _record(conn, target, dns_result, rdap_result, verdict, stats)
-                if index % 10 == 0 or index == len(targets):
-                    log.progress(f"checked {index:,}/{len(targets):,}")
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(probe, t) for t in targets]
+                done = 0
+                while done < len(targets):
+                    try:
+                        item = out.get(timeout=10.0)
+                    except queue.Empty:
+                        if all(f.done() for f in futures):
+                            log.warn(
+                                "workers",
+                                f"all workers exited with {len(targets) - done} "
+                                "result(s) outstanding",
+                            )
+                            break
+                        continue
+                    target, dns_result, rdap_result, exc = item
+                    done += 1
+                    if exc is not None:
+                        log.warn("check failed", f"{target.domain}: {exc}")
+                        continue
+                    verdict = classify(
+                        dns_result,
+                        rdap_result,
+                        url_states=url_state_tally(conn, target.domain_id),
+                    )
+                    _record(conn, target, dns_result, rdap_result, verdict, stats)
+                    if done % CHECKPOINT_EVERY == 0:
+                        conn.execute("COMMIT")
+                        conn.execute("BEGIN")
+                    if done % 100 == 0 or done == len(targets):
+                        log.progress(f"checked {done:,}/{len(targets):,}")
             conn.execute("COMMIT")
 
         conn.execute(

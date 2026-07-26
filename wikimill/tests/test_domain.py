@@ -327,3 +327,73 @@ def test_every_verdict_records_why():
         (dns_nx(), RdapResult(RdapStatus.NO_RDAP_FOR_TLD)),
     ]:
         assert classify(dns_result, rdap).reasons
+
+
+# -- parallel execution ------------------------------------------------------
+
+
+def test_rdap_stays_bounded_per_registry(tmp_path, monkeypatch):
+    """`.com` is ~41% of a tail sweep, so partitioning by registry would cap the
+    speedup. Instead each registry gets a small semaphore — this asserts the
+    bound actually holds under concurrency."""
+    import threading
+    from wikimill.domain import runner as dr
+
+    live = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def slow_query(domain, bootstrap, fetch):
+        with lock:
+            live["now"] += 1
+            live["peak"] = max(live["peak"], live["now"])
+        try:
+            import time as _t
+            _t.sleep(0.02)
+            return RdapResult(RdapStatus.REGISTERED)
+        finally:
+            with lock:
+                live["now"] -= 1
+
+    monkeypatch.setattr(dr.rdap_mod, "query", slow_query)
+    monkeypatch.setattr(dr.rdap_mod, "load_bootstrap",
+                        lambda *_a, **_k: Bootstrap.from_json(BOOTSTRAP))
+    monkeypatch.setattr(dr.dns_mod, "lookup", lambda *_a, **_k: dns_ok())
+
+    from wikimill.config import load
+    from wikimill.logging import RunLog
+    from wikimill.storage import open_db
+
+    monkeypatch.setenv("WIKIMILL_CONTACT", "ops@example.org")
+    cfg = load(tmp_path)
+    with open_db(cfg.db_path) as conn:
+        for i in range(40):
+            conn.execute(
+                "INSERT INTO domains (registrable_domain, public_suffix, state, first_seen,"
+                " wiki_page_count) VALUES (?,?,?,?,?)",
+                (f"host{i}.com", "com", "unknown", "2026-07-25T00:00:00+00:00", 1))
+
+    dr.run(cfg, RunLog("check", tmp_path / "l", quiet=True), limit=40, concurrency=16)
+    assert live["peak"] <= dr.RDAP_CONCURRENCY_PER_REGISTRY, (
+        f"{live['peak']} concurrent requests hit one registry; "
+        f"limit is {dr.RDAP_CONCURRENCY_PER_REGISTRY}")
+
+
+def test_a_failing_probe_does_not_hang_the_collector(tmp_path, monkeypatch):
+    """The crawl's silent-hang bug, in a new stage: a worker that dies without
+    reporting leaves the collector waiting forever."""
+    from wikimill.domain import runner as dr
+    from wikimill.config import load
+    from wikimill.logging import RunLog
+    from wikimill.storage import open_db
+
+    monkeypatch.setattr(dr.dns_mod, "lookup",
+                        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(dr.rdap_mod, "load_bootstrap", lambda *_a, **_k: None)
+    monkeypatch.setenv("WIKIMILL_CONTACT", "ops@example.org")
+    cfg = load(tmp_path)
+    with open_db(cfg.db_path) as conn:
+        conn.execute(
+            "INSERT INTO domains (registrable_domain, public_suffix, state, first_seen,"
+            " wiki_page_count) VALUES ('boom.com','com','unknown','2026-07-25T00:00:00+00:00',1)")
+    stats = dr.run(cfg, RunLog("check", tmp_path / "l", quiet=True), limit=5)
+    assert stats.checked == 0  # reported, not hung

@@ -257,12 +257,18 @@ def check(
         str | None, typer.Option("--state", help="Comma-separated states to check.")
     ] = None,
     force: Annotated[bool, typer.Option("--force", help="Ignore recheck windows.")] = False,
+    concurrency: Annotated[
+        int | None,
+        typer.Option("--concurrency", help="Parallel workers. RDAP stays bounded "
+                                           "per registry regardless."),
+    ] = None,
 ) -> None:
     """Run DNS + RDAP against due domains; the only place `unregistered` is set."""
     cfg = load_config()
     with RunLog(RunKind.CHECK, cfg.logs_dir) as log:
         gate(cfg, log)
-        domain_stage.run(cfg, log, limit=limit, states=state, force=force)
+        domain_stage.run(cfg, log, limit=limit, states=state, force=force,
+                         concurrency=concurrency)
 
 
 @app.command()

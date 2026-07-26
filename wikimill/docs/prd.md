@@ -286,6 +286,17 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 | v2.F | ⏳ planned | `exturlusage` verification pass before export ("does enwiki still link here?") |
 | v2.G | ⏳ planned | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
 | v2.H | ⏳ planned | Enrichment cache: keep decompressed blocks warm across runs when re-enriching a new dump run |
+| v2.I | ✅ done | **Parallel domain checks** — pulled forward ahead of `v2.A` because the v1.J tail sweep needed it |
+
+**v2.I** — ✅ shipped 2026-07-26, out of tier order. Stage 5 was the last sequential stage, at 1.36 domains/sec, making a 112,349-domain tail sweep a 23-hour job. Now **9.46/sec measured on 300 real domains — 7× faster**, bringing the sweep to ~3.3 hours.
+
+The crawler's parallelisation trick does **not** transfer. It partitions by the shared resource (one worker per registrable domain), which makes per-domain concurrency of 1 structural. The equivalent here would be partitioning by registry — but `.com` alone is **40.6%** of the unchecked tail and `.org` another 18.2%, so one partition would hold nearly half the work and cap the speedup at ~2.5× however many workers were added.
+
+So the two lookups get different treatment, because they consume different resources: **DNS** runs at full worker concurrency (public resolvers are built for the volume), while **RDAP** is guarded by a **per-registry semaphore** — the registry is gated, not the worker, so Verisign sees at most 4 in flight while the long tail of 1,514 other suffixes proceeds freely. A test asserts that bound holds under 16 workers.
+
+Two things deliberately unchanged: the **single writer** on the main thread (the v1.E bug where a SQLite connection reached worker threads is not one to repeat), and the **two-resolver agreement rule** for `unregistered` — parallelism must never become a reason to consult one resolver. Batch checkpointing every 50 results was added for the same reason as the crawler: re-running costs real requests to registries.
+
+Also corrects a doc-vs-code drift: `domain/runner.py` had claimed since v1.G that "work is paced per RDAP registry". It never was, until now.
 
 **Why config is a tier, not a chore.** Every threshold in v1 is a judgement call of mine, not a measured value: `unregistered` scoring +50, citations capped at +30, `is_private_suffix` at −15, the 60-day expiry watch, the parking marker lists. The v1.J soak exists to challenge those, and challenging them currently means editing Python and rebuilding. Until they are config, "tune it and re-run" is not a thing the operator can actually do.
 
