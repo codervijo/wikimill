@@ -20,7 +20,6 @@ EXPECTED_TABLES = {
     "link_diffs",
     "page_cache",
     "robots_cache",
-    "run_progress",
     "url_checks",
     "url_classifications",
     "urls",

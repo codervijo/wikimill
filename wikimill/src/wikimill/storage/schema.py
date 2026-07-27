@@ -398,6 +398,23 @@ MIGRATION_8: Final[tuple[str, ...]] = (
     "CREATE INDEX idx_run_progress_live ON run_progress(finished_at, updated_at)",
 )
 
+# v3.B, second pass. `run_progress` moved out of this database entirely, into
+# `state/progress.db`.
+#
+# MIGRATION_8 put it here, and that was wrong in a way a working demo hid: long
+# stages hold a write transaction open across a checkpoint interval, and in WAL
+# mode another process cannot see uncommitted rows. Progress was therefore
+# visible only at checkpoint boundaries, so a healthy-but-slow crawl would cross
+# the stall threshold and be reported as stuck. A second connection to this same
+# file cannot fix it either — SQLite allows one writer, so the heartbeat would
+# block behind the work it is describing.
+#
+# MIGRATION_8 is left exactly as shipped (migrations are never edited); this
+# drops what it created. The data was disposable by construction.
+MIGRATION_9: Final[tuple[str, ...]] = (
+    "DROP TABLE IF EXISTS run_progress",
+)
+
 MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_1,
     MIGRATION_2,
@@ -407,6 +424,7 @@ MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_6,
     MIGRATION_7,
     MIGRATION_8,
+    MIGRATION_9,
 )
 
 LATEST_VERSION: Final = len(MIGRATIONS)

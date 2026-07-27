@@ -34,7 +34,7 @@ from ..constants import RunKind, UrlState
 from ..errors import CrawlError
 from ..logging import RunLog, utcnow
 from ..policy import load as load_policy
-from ..progress import Heartbeat
+from ..progress import Heartbeat, open_progress_db
 from ..score import URL_DEATH_POINTS, priority_case
 from ..storage import open_db
 from . import robots as robots_mod
@@ -355,7 +355,11 @@ def run(
         # concurrent `stats` or `inspect` write fails on busy_timeout. Re-crawling
         # is not cheap: it costs real requests to other people's servers.
         conn.execute("BEGIN")
-        beat = Heartbeat(conn, log.run_id, "crawl", total=pending, phase="starting")
+        # Its own connection to its own file: progress must be visible to
+        # `report` immediately, not at this transaction's next commit.
+        beat_conn = open_progress_db(cfg.state_dir)
+        beat = Heartbeat(beat_conn, log.run_id, "crawl", total=pending,
+                         phase="starting")
         try:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [
@@ -424,6 +428,7 @@ def run(
             beat.finish("failed", note=f"{type(exc).__name__}: {exc}")
             raise
         beat.finish("ok")
+        beat_conn.close()
         robots_written = robots_mod.persist_store(conn, robots_store)
         conn.execute("COMMIT")
 

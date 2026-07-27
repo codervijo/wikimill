@@ -15,11 +15,37 @@ attaching a debugger and without waiting to see if output resumes**:
   when the heartbeat stopped. That single field is the difference between "the
   crawler hung" and "the crawler is waiting on a DNS timeout for foo.example".
 
-## Design notes, because this is meant to be lifted into other crawlers
+## It lives in its own database file, and that is the whole trick
 
-* **Upsert, not append.** The rest of this schema is append-only because history
-  is the product. This table answers a question about *now*; one current row
-  beats scanning ten thousand stale ones, and losing the table costs nothing the
+The obvious implementation — write progress on the same connection as the work —
+is broken, and subtly enough that it survived a working demo.
+
+Long stages hold a write transaction open across a checkpoint interval (25 URLs
+for the crawler) so an interrupted run resumes without re-fetching. In WAL mode
+another process cannot see uncommitted rows, so progress written inside that
+transaction only becomes visible **at checkpoint boundaries** — up to 41 seconds
+at the measured crawl rate, and far longer when hosts time out. A healthy but
+slow crawl would then cross the stall threshold and be reported as stuck. False
+"it is stuck" alarms are exactly what teaches an operator to ignore the signal,
+which is worse than not having it.
+
+Nor can a second connection to the *same* database fix it: SQLite permits one
+writer, so the heartbeat would block behind the work transaction it is trying to
+describe, and — being best-effort — would silently write nothing at all.
+
+So progress gets its own file, `state/progress.db`, with no lock contention with
+the work database ever. Three things fall out of that, all of them wanted:
+
+* Progress is visible **immediately**, on every write, to any process.
+* Progress survives a rolled-back work transaction — correct, because it is an
+  observation about the *process*, not about the data.
+* For the other crawlers this is a pilot for, it drops in without touching the
+  host project's schema at all.
+
+## Other design notes
+
+* **Upsert, not append.** This answers a question about *now*; one current row
+  beats scanning ten thousand stale ones, and losing the file costs nothing the
   run logs do not already hold.
 * **Throttled.** A heartbeat that writes on every item turns an I/O-bound loop
   into a database-bound one. Writes are rate-limited by wall clock, and the
@@ -27,7 +53,7 @@ attaching a debugger and without waiting to see if output resumes**:
 * **Never fatal.** A stage must not die because its progress bookkeeping failed.
   Every write is best-effort; the crawl matters and the heartbeat does not.
 * **Nothing here is wikimill-specific.** Stage names are strings, counters are
-  integers. The mechanism ports to any pipeline with long stages.
+  integers, and the only dependency is a writable directory.
 """
 
 from __future__ import annotations
@@ -35,8 +61,47 @@ from __future__ import annotations
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .logging import utcnow
+
+PROGRESS_FILENAME = "progress.db"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_progress (
+    run_id       TEXT    NOT NULL,
+    stage        TEXT    NOT NULL,
+    phase        TEXT,
+    done         INTEGER NOT NULL DEFAULT 0,
+    total        INTEGER,
+    current_item TEXT,
+    note         TEXT,
+    started_at   TEXT    NOT NULL,
+    updated_at   TEXT    NOT NULL,
+    finished_at  TEXT,
+    outcome      TEXT,
+    PRIMARY KEY (run_id, stage)
+);
+CREATE INDEX IF NOT EXISTS idx_run_progress_live
+    ON run_progress(finished_at, updated_at);
+"""
+
+
+def open_progress_db(state_dir: Path | str) -> sqlite3.Connection:
+    """Connect to the progress file, creating it if absent.
+
+    `isolation_level=None` is the point: autocommit, so every heartbeat is
+    visible to other processes the instant it is written. No migration
+    framework — the file is disposable, so `CREATE TABLE IF NOT EXISTS` is the
+    whole upgrade story, and a schema change is handled by deleting the file.
+    """
+    path = Path(state_dir) / PROGRESS_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), isolation_level=None, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(_SCHEMA)
+    return conn
 
 # How often a running stage may write. Frequent enough that a stall is obvious
 # within seconds; rare enough to be free next to a network round-trip.

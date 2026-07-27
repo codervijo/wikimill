@@ -66,7 +66,7 @@ wikimill/
 │   ├── score.py               # v1.I: explainable ranking (never exclusion)
 │   ├── inspect.py             # v1.I: everything known about one thing
 │   └── export.py              # v1.I: deterministic, attributable candidate file
-├── tests/                     # 606 tests, hermetic (no network, no Docker)
+├── tests/                     # 607 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -275,6 +275,16 @@ The launcher forwards every other host `WIKIMILL_*` variable with `-e` *after* `
 
 Derived and disposable: every row regenerates from the archive, so eviction is plain LRU against a byte budget and clearing costs time rather than information. Redirect stubs are never stored. `--no-cache` forces a read from the dump; `[enrich] cache_enabled` and `cache_max_bytes` are the knobs.
 
+### 8a. Cross-dump-run diff (v2.G)
+
+`link_diffs` records what changed between two ingested runs: `removed` and `added`, keyed on `(url_hash, page_id, lang, from_run, to_run, transition)` so recomputing a pair is a no-op. Append-only, like every other observation table.
+
+**A removal is corroboration, never a verdict.** Editors drop citations for reasons that correlate strongly with a dead site — but also when a paragraph is rewritten or a source upgraded. So a removal adds points to a domain's score and appears in the export as `wiki_removed`; nothing here writes a URL or domain state.
+
+**Only pages present in both runs are compared, and this is the important part.** wikimill ingests slices, so a page missing from the newer run may have been deleted or may never have been ingested — indistinguishable from inside the database, and opposite in meaning. Comparing them anyway would fabricate one confident false positive per link on every un-ingested page. The comparison is therefore scoped to the intersection, and the remainder is reported as a *not comparable* count. There is deliberately no `page_deleted` transition; the schema comment says so, so nobody adds one later thinking it was an oversight.
+
+The diff runs at the end of `ingest` rather than behind its own verb: the moment a second run lands is when the comparison becomes possible and when the operator wants it, and it costs two indexed queries on top of work already done. `stats --diff` displays stored results.
+
 ### 8b. Liveness — the heartbeat (v3.B)
 
 **Commissioned as a pilot for the operator's other crawlers, so the mechanism is deliberately project-agnostic:** stage names are strings, counters are integers, and the only dependency is a SQLite connection and one table.
@@ -310,15 +320,151 @@ Hard constraints, all deliberate: **no network of any kind** — no CDN, webfont
 
 Its visual language is this project's own `✓ ✗ ↷` markers, which the operator already reads fluently from the terminal, carrying the same meanings as in `logging.py` so nothing new has to be learned.
 
-### 8a. Cross-dump-run diff (v2.G)
+### 8d. Liveness and report — implementation
 
-`link_diffs` records what changed between two ingested runs: `removed` and `added`, keyed on `(url_hash, page_id, lang, from_run, to_run, transition)` so recomputing a pair is a no-op. Append-only, like every other observation table.
+How the two previous sections are actually built.
 
-**A removal is corroboration, never a verdict.** Editors drop citations for reasons that correlate strongly with a dead site — but also when a paragraph is rewritten or a source upgraded. So a removal adds points to a domain's score and appears in the export as `wiki_removed`; nothing here writes a URL or domain state.
+#### File layout
 
-**Only pages present in both runs are compared, and this is the important part.** wikimill ingests slices, so a page missing from the newer run may have been deleted or may never have been ingested — indistinguishable from inside the database, and opposite in meaning. Comparing them anyway would fabricate one confident false positive per link on every un-ingested page. The comparison is therefore scoped to the intersection, and the remainder is reported as a *not comparable* count. There is deliberately no `page_deleted` transition; the schema comment says so, so nobody adds one later thinking it was an oversight.
+```
+state/wikimill.db     the work database — 15 tables, migrated, WAL
+state/progress.db     the heartbeat — ONE table, no migrations, WAL, autocommit
+outputs/report.html   the rendered page (+ report.html.tmp during a write)
+```
 
-The diff runs at the end of `ingest` rather than behind its own verb: the moment a second run lands is when the comparison becomes possible and when the operator wants it, and it costs two indexed queries on top of work already done. `stats --diff` displays stored results.
+`progress.db` has no migration framework on purpose. The file is disposable —
+every row is regenerable by re-running, and none of it is evidence — so
+`CREATE TABLE IF NOT EXISTS` at connect time is the entire upgrade story, and a
+schema change is handled by deleting the file. `open_progress_db()` sets
+`isolation_level=None`, which is the load-bearing line: autocommit means each
+heartbeat lands and is visible to other processes the instant it is written.
+
+#### Why two files — the bug that forced it
+
+The first implementation put `run_progress` in the work database (MIGRATION_8)
+and wrote it on the runner's existing connection. It passed its tests and
+survived a live demo, and it was wrong.
+
+Long stages hold a write transaction open across a checkpoint interval —
+`CHECKPOINT_EVERY = 25` in the crawler, 50 in the domain checker — so an
+interrupted run resumes without re-fetching. In WAL mode a second process cannot
+see uncommitted rows. Progress written inside that transaction therefore became
+visible **only at checkpoint boundaries**: ~41 s at the measured 0.61 URL/s, and
+much longer when hosts time out. Past `STALL_SECONDS = 90` a perfectly healthy
+crawl would be reported as stuck, and a false "it is stuck" alarm is what
+teaches an operator to ignore the indicator entirely.
+
+A second connection to the *same* file does not fix it either: SQLite permits
+one writer, so the heartbeat would block behind the very transaction it is
+describing and — being best-effort — would silently write nothing.
+
+Hence a separate file, which has no lock contention with the work database ever.
+MIGRATION_9 drops the table MIGRATION_8 created; the shipped migration is left
+untouched, per the never-edit rule. Measured after the change: a live crawl
+reported `4/60` and `7/60` with an age of ≤ 2 s, well before the first
+checkpoint at 25.
+
+#### The write path
+
+```python
+beat_conn = open_progress_db(cfg.state_dir)          # own file, autocommit
+beat = Heartbeat(beat_conn, log.run_id, "crawl",     # forced first write
+                 total=pending, phase="starting")
+...
+beat.advance(0, phase="crawling", current_item=url)  # throttled
+beat.done = done                                     # authoritative counter
+...
+beat.touch(phase="waiting on workers")               # idle-path liveness
+...
+beat.finish("ok"); beat_conn.close()
+```
+
+Four details carry the design:
+
+- **The constructor writes immediately.** A stage that first appears once it has
+  completed an item is invisible for exactly as long as the first item is slow —
+  which is when someone is most likely watching.
+- **`_write()` is throttled by `time.monotonic()`** against `HEARTBEAT_SECONDS =
+  2.0`, so a tight loop costs nothing. `force=True` on the first and last writes
+  means the final state is never lost to throttling.
+- **`touch()` is called on the idle path** — in both runners, from the
+  `queue.Empty` branch of the result loop. This is the call that is easy to omit
+  and the one that matters: a stage which only writes on completed work looks
+  stalled while it waits on a slow host.
+- **Every write is wrapped in a bare `except`.** The crawl matters; its
+  bookkeeping does not. A test drops the table mid-run and asserts the run
+  finishes anyway.
+
+Failure paths are explicit rather than implicit. `KeyboardInterrupt` records
+`interrupted`; a `BaseException` handler records `failed` with the exception
+text; the `__exit__` of the context-manager form does the same. A crash must
+leave a row *saying* it crashed, not a row that went quiet and has to be
+diagnosed by its silence.
+
+#### The read path
+
+`snapshot(conn, now)` returns `StageView` objects ordered by `updated_at`. All
+the interesting values are derived rather than stored, so they cannot go stale:
+
+| Property | Derivation |
+|---|---|
+| `running` | `finished_at IS NULL` |
+| `stalled` | `running and age_seconds > STALL_SECONDS` |
+| `percent` | `done / total`, `None` when `total` is unknown |
+| `rate_per_second` | `done / (updated_at − started_at)` — real elapsed time |
+| `eta_seconds` | `(total − done) / rate` |
+| `status` | `stalled` → `running` → `outcome` |
+
+`percent` and `eta` return `None` rather than a guess when `total` is unknown:
+better to show nothing than to invent a denominator. And `stalled` requires
+`running`, so a finished stage never turns red however old it gets — otherwise
+every completed run in the file eventually becomes a false alarm.
+
+#### Report generation
+
+`report.collect()` makes one pass over the work database (funnel counts, state
+distribution, candidate rows with their evidence) and one bounded read of the
+progress file. A missing progress file is caught and treated as "no stage has
+reported yet", which is the normal state of a fresh checkout, not an error.
+
+`report.render()` returns the whole page as a single string with `<style>` and
+`<script>` inlined. Every value that came from the corpus goes through
+`html.escape` — domain names and article titles originate in Wikipedia, which
+anyone may edit, so they are untrusted text and a test asserts a
+`<script>`-bearing domain name is escaped rather than executed.
+
+The CLI writes `report.html.tmp` and then `Path.replace()`s it into position.
+That rename is atomic on POSIX, so a browser refreshing on a timer can never
+read a half-written file — the failure `--watch` would otherwise hit constantly.
+
+`--watch N` loops `collect → render → replace` on an interval and prints one
+line per cycle, so the terminal shows movement as well as the browser. The
+`<meta http-equiv="refresh">` tag is emitted **only when a stage is currently
+running**; a page that reloads forever fights the person trying to read it.
+
+#### Client-side filtering
+
+The page embeds every candidate row as a `<tr>` carrying `data-state`,
+`data-domain`, `data-score`, `data-pages` and a pre-lowercased `data-search`
+blob. The inline script only toggles `hidden` and re-appends rows for sorting —
+there is no templating, no framework and no fetch, because the page is a file
+rather than a service and there is nothing to query. `MAX_ROWS = 3000` bounds
+what is embedded, and the page states when it has truncated, since showing
+3,000 of 50,000 without saying so reads as complete.
+
+#### Porting this to another crawler
+
+`progress.py` has no wikimill imports beyond `utcnow`. To lift it:
+
+1. Copy `progress.py`; the only dependency is a writable directory.
+2. Call `open_progress_db(state_dir)` once per long stage and build a `Heartbeat`.
+3. `advance()` on completed work, `touch()` on the idle path, `finish()` at the end.
+4. Read with `snapshot()` from any other process.
+
+The pattern itself is the transferable part: **heartbeat carrying the current
+item, plus stall-detection by staleness, written somewhere with no lock
+contention against the work.** The current item is what turns "it is stuck" into
+"it is stuck on this host".
 
 ### 9a. Policy — `wikimill.toml` (v2.B/v2.C)
 
@@ -384,7 +530,7 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 13. Testing
 
-606 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+607 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness

@@ -42,6 +42,7 @@ brochure for one.
 
 from __future__ import annotations
 
+import contextlib
 import html
 import json
 import sqlite3
@@ -142,7 +143,16 @@ def collect(conn: sqlite3.Connection, cfg=None, states: list[str] | None = None,
             "SELECT state, COUNT(*) n FROM domains GROUP BY state ORDER BY n DESC"
         )
     ]
-    data.stages = progress_mod.snapshot(conn, data.generated_at)
+    # From the separate progress file — see progress.py for why it is not in
+    # this database. Absent on a fresh checkout, which is not an error.
+    if cfg is not None:
+        try:
+            with contextlib.closing(
+                progress_mod.open_progress_db(cfg.state_dir)
+            ) as beat_conn:
+                data.stages = progress_mod.snapshot(beat_conn, data.generated_at)
+        except sqlite3.Error:
+            data.stages = []
 
     try:
         from .policy import load as load_policy

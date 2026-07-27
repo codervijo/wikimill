@@ -38,7 +38,7 @@ from ..constants import (
 )
 from ..logging import RunLog, utcnow
 from ..policy import Policy
-from ..progress import Heartbeat
+from ..progress import Heartbeat, open_progress_db
 from ..score import STATE_POINTS, priority_case
 from ..policy import load as load_policy
 from ..storage import open_db
@@ -308,7 +308,10 @@ def run(
                     out.put((target, None, None, exc))
 
             conn.execute("BEGIN")
-            beat = Heartbeat(conn, log.run_id, "check", total=len(targets),
+            # Its own connection to its own file: progress must be visible to
+            # `report` immediately, not at this transaction's next commit.
+            beat_conn = open_progress_db(cfg.state_dir)
+            beat = Heartbeat(beat_conn, log.run_id, "check", total=len(targets),
                              phase="starting")
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [pool.submit(probe, t) for t in targets]
@@ -348,6 +351,7 @@ def run(
                     if done % 100 == 0 or done == len(targets):
                         log.progress(f"checked {done:,}/{len(targets):,}")
             beat.finish("ok")
+            beat_conn.close()
             conn.execute("COMMIT")
 
         conn.execute(
