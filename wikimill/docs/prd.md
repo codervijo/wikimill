@@ -377,21 +377,43 @@ Also corrects a doc-vs-code drift: `domain/runner.py` had claimed since v1.G tha
 
 ### v3 — Reporting & scale
 
-Adds a **self-contained HTML report** — a local, offline file in the spirit of the pipeline page that made this project legible — then the scale work.
+Measures what the pipeline's expensive stage is actually worth, then adds a **self-contained HTML report** — a local, offline file in the spirit of the pipeline page that made this project legible — then the scale work. The order is deliberate and was changed at `v3.A` on measured evidence; see below.
 
 | Phase | Status | Title |
 |---|---|---|
-| v3.A | ⏳ planned | Plan the tier: report shape and surface (see below), informed by v1.J's measured numbers |
-| v3.B | ⏳ planned | **HTML report**: one self-contained file, no network, no CDN — inline CSS, no external fonts or scripts. Candidate table with **clickable Wikipedia citations** (deep-linked to `#Section`), score breakdown per candidate, the state distribution, and run provenance (dump run, slice, counts, generated-at) |
-| v3.C | ⏳ planned | **Pipeline/status view** in the same file: stages built, corpus funnel, measured throughput — the operator-facing version of the planning artifact, generated from the database rather than hand-written |
-| v3.D | ⏳ planned | Full-enwiki SQL ingest; measure ingest time, DB size, row counts, URL/domain cardinality |
+| v3.A | ✅ done | Plan the tier — reordered around measured evidence; report surface settled |
+| v3.B | ⏳ planned | **Crawl yield measurement**: does HTTP crawling surface candidates DNS+RDAP alone did not? A bounded, unbiased sample and a go/no-go for `v3.F` |
+| v3.C | ⏳ planned | **`report` command**: one self-contained HTML file — candidate table with clickable Wikipedia citations, per-candidate score breakdown, corpus funnel, stage status, state distribution, provenance. No network, no CDN, inline CSS |
+| v3.D | ⏳ planned | **Large bounded ingest** (~10–20× the current corpus): measure DB growth and cardinality curves before committing to all of enwiki |
 | v3.E | ⏳ planned | Storage decision point: does SQLite hold, or is Postgres warranted? Evidence-driven, ADR-recorded |
-| v3.F | ⏳ planned | Crawl throughput tuning within the politeness envelope |
+| v3.F | ⏳ planned | Crawl throughput tuning within the politeness envelope — **conditional on v3.B** |
 
-**Open decision for `v3.A` — surface.** Two candidates, deliberately not settled here:
+**v3.A** — ✅ planned 2026-07-26. The tier as originally sketched put reporting first and scale last. Three measurements taken at the start of the tier reordered it.
 
-- **`export --format html`** — a third format alongside csv/jsonl. Adds no verb, and fits "keep the CLI small"; but the page wanted is more than a candidate list.
-- **`report` command** — a tenth verb producing the fuller dashboard (funnel, stage status, distributions). Honest about being a different artefact from an export, at the cost of surface area.
+| | |
+|---|---|
+| Corpus ingested | 27,152 pages → 1.43M links → 1.33M URLs → 135,591 domains |
+| Database size | 1.6 GB — about **62 KB per ingested page** |
+| Domain checks (DNS + RDAP) | 135,591 domains in **1.9 h** at 16.2/sec → **1,702** candidates |
+| HTTP crawl | **440 of 1,326,045 URLs — 0.03%**, at 0.61 URL/s |
+
+**The crawl is the expensive stage and it is essentially unexercised.** At the measured 0.61 URL/s, crawling the current corpus is a **~25-day continuous job**. That rate is bounded by politeness — one request per registrable domain plus a per-host delay — and those are not knobs, so `v3.F` cannot recover much of it.
+
+**Every candidate found so far came from domain checks, not from crawling.** DNS + RDAP swept the whole corpus in under two hours and produced all 1,702. Meanwhile `for_sale` = 1 and `parked` = 0 across 135,591 domains — and those are exactly the states only the crawl can produce. So the crawl's marginal yield is **unmeasured**, and a 25-day job of unknown value is a larger open question than either reporting or storage. It becomes `v3.B`.
+
+**Surface decision — settled: a `report` command**, the tenth verb. The alternative was `export --format html`, which adds no verb and keeps the CLI at nine. It was rejected because the artefact wanted is a dashboard — corpus funnel, stage status, distributions, provenance — and only part of it is a candidate list. Making it a format would force the rest to masquerade as an export or be dropped, which is worse than one honest verb. This also merges the old v3.B and v3.C: they were always one file.
+
+**Scale decision — a large bounded ingest before all of enwiki.** At ~62 KB per ingested page the extrapolation to a full ingest runs to hundreds of GB. Domains dedupe sublinearly so that over-states it, but not by an order of magnitude, and it would likely force `v3.E`'s storage question *during* the ingest rather than after. A ~10–20× ingest measures the growth and cardinality curves for real, and replaces the extrapolation above with data.
+
+**`v3.B` in detail.** The question: *does crawling find candidates that DNS + RDAP alone did not?*
+
+- A bounded sample of **≥5,000 URLs** (~2.3 h at the measured rate). The sample is unbiased for free: never-checked URLs order by `url_hash`, which is effectively random.
+- Measure candidates the crawl found that the domain sweep had not flagged — chiefly `parked`, `for_sale`, `soft_404` on domains currently recorded `active`.
+- Measure **candidates per hour** for each stage, so the two are compared on cost rather than on count. The domain sweep's figure is already known: ~896/h.
+- Measure how many crawled URLs belong to domains *already* known `unregistered`, since that is effort spent re-confirming a settled answer.
+- Deliverable: a section in `docs/soak-report.md` and an explicit **go/no-go for `v3.F`**. If the crawl's marginal yield is negligible, tuning its throughput is optimising work that should not be done at all, and the honest outcome is to drop `v3.F` rather than ship it.
+
+No new code is expected for `v3.B` beyond whatever analysis the comparison needs — `crawl --limit` already does the work. It is a measurement phase, and saying so is better than inventing a feature to justify it.
 
 **Constraints already known.** The file must be self-contained and open offline from `outputs/` — no CDN, no webfonts, no analytics. It carries the same CC BY-SA header and per-row attribution as the CSV, because anchor text and section names are Wikipedia excerpts either way (§17). And it must be **deterministic in its data** like the CSV, so two reports diff meaningfully; the generated-at stamp stays outside the hashed content.
 
@@ -644,8 +666,8 @@ Rationale: single-writer local tool, zero-ops, transactional, trivially backed u
 - **Layout:** `state/wikimill.db` · `state/dumps/` (the SQL dump, the XML multistream archive, and its index — large, gitignored, never committed, downloaded once and reused) · `state/logs/<run_id>.jsonl` · `outputs/` (exports).
 - **The dumps are the cold store.** Deferred context lives in `state/dumps/`, not in the database. This is what keeps the DB proportional to *interesting* data rather than to Wikipedia. Roughly 32 GB total, so the directory is relocatable to any host path via `WIKIMILL_DUMPS_DIR` (§15) without moving the database.
 - **Bounded growth:** the evidence-blob cap (§9) plus null-until-enriched context columns.
-- **Postgres is deferred, not rejected.** Warranted only on *measured* evidence from v3.B — ingest time, DB size, query latency at full-enwiki scale. Guessing that ceiling now would be exactly the speculative-tier mistake. The trigger and the decision get an ADR when the numbers exist.
-- **The row counts of a full enwiki ingest are currently unknown.** They are a v3.B measurement, not an estimate in this document.
+- **Postgres is deferred, not rejected.** Warranted only on *measured* evidence from v3.D — ingest time, DB size, query latency at scale. Guessing that ceiling now would be exactly the speculative-tier mistake. The trigger and the decision get an ADR when the numbers exist.
+- **The row counts of a full enwiki ingest are currently unknown.** They are a v3.D measurement, not an estimate in this document. What *is* measured, as of v3.A: 62 KB of database per ingested page, over a 27,152-page corpus.
 
 ## 15. CLI command design
 
@@ -825,7 +847,7 @@ Violations are bugs, not stylistic preferences.
 | **Parked-page detection is heuristic** and drifts as parking providers change templates. | False positives/negatives on the highest-value class. | Versioned classifier + stored evidence → re-classify offline when signatures are updated, with zero re-fetching. |
 | **RDAP coverage is uneven** across TLDs; some ccTLDs offer none. | Some domains can never be confirmed unregistered. | Honest `no_rdap_for_tld` state. Never guessed. Coverage becomes a measured, reportable number. |
 | **False NXDOMAIN → fabricated "available" domain.** | The single most expensive error this tool can make; the operator could act on it. | Two-resolver agreement required *and* RDAP confirmation, both recorded (§13). |
-| **SQLite at full-enwiki scale.** | v3 could stall on write throughput or DB size. | v1/v2 stay bounded; v3.B measures before v3.C decides. No premature Postgres. |
+| **SQLite at full-enwiki scale.** | v3 could stall on write throughput or DB size. | v1/v2 stay bounded; v3.D measures before v3.E decides. No premature Postgres. |
 | **Dump-source fragility.** The free Enterprise HTML mirror already died once (March 2025). | A source we depend on could vanish. | Both primary sources are the plainest, oldest, most stable artifacts Wikimedia publishes. Slices are kept locally, so a mirror outage does not stop work. |
 | **Politeness vs. throughput.** Per-domain concurrency of 1 caps crawl speed. | Large runs take a long time. | Accepted deliberately. Breadth across many domains provides the parallelism; a faster crawler is not worth being a bad citizen. |
 | **Ethical / reputational.** Wikipedia-cited domains attract link-spam acquisition. | Misuse would degrade Wikipedia. | Evidence-forward exports; clean+relevant scoring; no auto-acquisition (§2, §17). |
