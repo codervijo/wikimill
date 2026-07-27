@@ -65,6 +65,7 @@ class Scoring:
     citation_points_per_page: int = score.CITATION_POINTS_PER_PAGE
     citation_points_cap: int = score.CITATION_POINTS_CAP
     dead_link_tagged_points: int = score.DEAD_LINK_TAGGED_POINTS
+    wiki_removed_points: int = score.WIKI_REMOVED_POINTS
     private_suffix_penalty: int = score.PRIVATE_SUFFIX_PENALTY
 
 

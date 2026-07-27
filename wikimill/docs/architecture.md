@@ -57,11 +57,12 @@ wikimill/
 │   │   ├── seek.py            #   offset -> one bz2 block -> pages
 │   │   ├── wikitext.py        #   section, anchor, ref/cite context
 │   │   └── runner.py          #   block batching, single writer
+│   ├── diff.py                # v2.G: cross-dump-run link transitions
 │   ├── schedule.py            # v2.E: what's due, answered from the DB alone
 │   ├── score.py               # v1.I: explainable ranking (never exclusion)
 │   ├── inspect.py             # v1.I: everything known about one thing
 │   └── export.py              # v1.I: deterministic, attributable candidate file
-├── tests/                     # 505 tests, hermetic (no network, no Docker)
+├── tests/                     # 531 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -236,7 +237,7 @@ registrar pages are never scraped.
 
 ## 8. Storage
 
-SQLite, single file, WAL, at `state/wikimill.db`. Ten tables (schema in `storage/schema.py`, documented in `prd.md` §9).
+SQLite, single file, WAL, at `state/wikimill.db`. Twelve tables (schema in `storage/schema.py`, documented in `prd.md` §9).
 
 **Load-bearing invariants:**
 
@@ -261,6 +262,16 @@ Variables split across two layers, and the launcher handles both:
 The launcher forwards every other host `WIKIMILL_*` variable with `-e` *after* `--env-file`, which is what preserves the precedence rule. (Omitting this was a real bug caught in v1.B soak: inline overrides silently stopped at the host.)
 
 **Secrets.** None are needed at v1, but the whole path is built: gitignored `wikimill.env`, committed `.example` with no real values, and redaction of any variable matching `*_KEY|*_TOKEN|*_SECRET|*_PASSWORD` across `preflight`, `--json`, logs, and `crawl_runs.args`. Retrofitting this around a key that has already been committed once is far more expensive.
+
+### 8a. Cross-dump-run diff (v2.G)
+
+`link_diffs` records what changed between two ingested runs: `removed` and `added`, keyed on `(url_hash, page_id, lang, from_run, to_run, transition)` so recomputing a pair is a no-op. Append-only, like every other observation table.
+
+**A removal is corroboration, never a verdict.** Editors drop citations for reasons that correlate strongly with a dead site — but also when a paragraph is rewritten or a source upgraded. So a removal adds points to a domain's score and appears in the export as `wiki_removed`; nothing here writes a URL or domain state.
+
+**Only pages present in both runs are compared, and this is the important part.** wikimill ingests slices, so a page missing from the newer run may have been deleted or may never have been ingested — indistinguishable from inside the database, and opposite in meaning. Comparing them anyway would fabricate one confident false positive per link on every un-ingested page. The comparison is therefore scoped to the intersection, and the remainder is reported as a *not comparable* count. There is deliberately no `page_deleted` transition; the schema comment says so, so nobody adds one later thinking it was an oversight.
+
+The diff runs at the end of `ingest` rather than behind its own verb: the moment a second run lands is when the comparison becomes possible and when the operator wants it, and it costs two indexed queries on top of work already done. `stats --diff` displays stored results.
 
 ### 9a. Policy — `wikimill.toml` (v2.B/v2.C)
 
@@ -326,7 +337,7 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 13. Testing
 
-505 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+531 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness

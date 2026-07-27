@@ -277,11 +277,41 @@ MIGRATION_4: Final[tuple[str, ...]] = (
     "ALTER TABLE domain_checks DROP COLUMN classifier_version",
 )
 
+# v2.G. Cross-dump-run link transitions. Append-only, like every other
+# observation table: a diff is a thing we *saw* between two runs, and
+# recomputing it later must never silently rewrite what an earlier comparison
+# concluded.
+#
+# `page_deleted` is deliberately NOT a transition here. A page absent from the
+# newer run is indistinguishable from a page that run simply never ingested —
+# this tool ingests slices — and the two mean opposite things. Only pages
+# present in *both* runs are compared; the rest are counted as not-comparable
+# rather than dressed up as a signal.
+MIGRATION_5: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE link_diffs (
+        id          INTEGER PRIMARY KEY,
+        url_hash    TEXT    NOT NULL,
+        page_id     INTEGER NOT NULL,
+        lang        TEXT    NOT NULL DEFAULT 'en',
+        from_run    TEXT    NOT NULL,
+        to_run      TEXT    NOT NULL,
+        -- 'removed' | 'added'
+        transition  TEXT    NOT NULL,
+        observed_at TEXT    NOT NULL,
+        UNIQUE (url_hash, page_id, lang, from_run, to_run, transition)
+    )
+    """,
+    "CREATE INDEX idx_link_diffs_url ON link_diffs(url_hash, transition)",
+    "CREATE INDEX idx_link_diffs_runs ON link_diffs(from_run, to_run)",
+)
+
 MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_1,
     MIGRATION_2,
     MIGRATION_3,
     MIGRATION_4,
+    MIGRATION_5,
 )
 
 LATEST_VERSION: Final = len(MIGRATIONS)

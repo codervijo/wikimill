@@ -30,6 +30,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import diff
 from .constants import DomainState
 from .logging import utcnow
 
@@ -61,6 +62,10 @@ COLUMNS = (
     "example_anchor",
     "example_link_kind",
     "dead_link_tagged",
+    # v2.G. Its own column rather than only a line in score_explanation: this is
+    # the one piece of evidence that comes from a human who looked at the page,
+    # so it should be sortable in a spreadsheet, not buried in a JSON blob.
+    "wiki_removed",
     "archive_url",
     "score_explanation",
 )
@@ -165,6 +170,7 @@ def collect(
             "example_anchor": "",
             "example_link_kind": "",
             "dead_link_tagged": "",
+            "wiki_removed": diff.removal_counts(conn, row["domain_id"]) or "",
             "archive_url": "",
             "score_explanation": row["score_explanation"] or "",
         }

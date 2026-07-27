@@ -27,6 +27,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 
+from . import diff
 from .constants import DomainState, UrlState
 
 SCORER_VERSION = 1
@@ -57,6 +58,12 @@ CITATION_POINTS_PER_PAGE = 3
 CITATION_POINTS_CAP = 30      # a domain cited by 50 articles is not 5× one cited by 10
 KIND_POINTS = {"citation": 8, "external_links_section": 5, "further_reading": 4}
 DEAD_LINK_TAGGED_POINTS = 5   # a Wikipedia editor already noticed
+# An editor did more than notice — they removed the citation between dump runs
+# (v2.G). Worth more than a {{dead link}} tag, because tagging is a note and
+# removal is an act. Still modest and still corroboration only: links also get
+# dropped when a paragraph is rewritten or a source upgraded, so this ranks a
+# candidate higher, it never makes one.
+WIKI_REMOVED_POINTS = 7
 PRIVATE_SUFFIX_PENALTY = -15
 
 
@@ -139,6 +146,7 @@ def score_domain(
     per_page = w.citation_points_per_page if w else CITATION_POINTS_PER_PAGE
     cap = w.citation_points_cap if w else CITATION_POINTS_CAP
     tagged_points = w.dead_link_tagged_points if w else DEAD_LINK_TAGGED_POINTS
+    removed_points = w.wiki_removed_points if w else WIKI_REMOVED_POINTS
     penalty = w.private_suffix_penalty if w else PRIVATE_SUFFIX_PENALTY
     score = Score()
 
@@ -170,6 +178,14 @@ def score_domain(
             "editor corroboration",
             tagged_points,
             "Wikipedia tagged {{dead link}}",
+        )
+
+    removed = kinds.get("__wiki_removed__", 0)
+    if removed:
+        score.add(
+            "editor removal",
+            removed_points,
+            f"{removed} citation(s) dropped from Wikipedia between dump runs",
         )
 
     if row["is_private_suffix"]:
@@ -207,6 +223,12 @@ def evidence_for(conn: sqlite3.Connection, domain_id: int) -> tuple[dict, dict]:
     ).fetchone()["n"]
     if tagged:
         kinds["__dead_link_tagged__"] = tagged
+    # Sentinel keys rather than a third return value: `score_domain` stays a
+    # pure function of three plain dicts, which is what lets a test score a
+    # domain without a database.
+    removed = diff.removal_counts(conn, domain_id)
+    if removed:
+        kinds["__wiki_removed__"] = removed
     return url_states, kinds
 
 

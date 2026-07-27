@@ -22,6 +22,9 @@
 # citation_points_per_page = 3
 # citation_points_cap = 30
 # dead_link_tagged_points = 5
+# An editor removed the citation between dump runs (v2.G). Worth more than
+# a {{dead link}} tag: tagging is a note, removal is an act.
+# wiki_removed_points = 7
 # private_suffix_penalty = -15
 
 # [scoring.state_points]

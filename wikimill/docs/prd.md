@@ -284,7 +284,7 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 | v2.D | ✅ done | **Operator-editable marker lists**: parking/for-sale/soft-404 signatures, tracking-parameter list, Wikimedia + resolver exclusion lists — with a `CLASSIFIER_VERSION` bump on change so verdicts stay auditable |
 | v2.E | ✅ done | Recheck scheduler (§12): `next_check_at`, tiered cadences, `--due` selection, terminal-record protection |
 | v2.F | ⏳ planned | `exturlusage` verification pass before export ("does enwiki still link here?") |
-| v2.G | ⏳ planned | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
+| v2.G | ✅ done | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
 | v2.H | ⏳ planned | Enrichment cache: keep decompressed blocks warm across runs when re-enriching a new dump run |
 | v2.I | ✅ done | **Parallel domain checks** — pulled forward ahead of `v2.A` because the v1.J tail sweep needed it |
 
@@ -324,6 +324,16 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 **The queue is now observable without running it.** `stats --due` reports both queues as five disjoint buckets — never checked / due now / due within 7d / due later / terminal — plus which states are due, because a bare count is not actionable: three due `for_sale` records justify a run that a hundred thousand due `live` ones do not. No new verb; `stats` gains a flag. It reads the database and makes no requests, so the cheapest question the operator has stops costing a crawl against real hosts.
 
 Adding the two escalation ceilings to `[classify]` shifted the policy fingerprint (`1+4458ff725a4c` → `1+00652c9f0efd`), so the next `crawl --reclassify` will re-judge the 440 stored verdicts. That is the fingerprint working as designed — cadences live in a classifying section — and it is cheap here, but it is worth knowing the rule bites on scheduling changes too, not only on marker edits.
+
+**v2.G** — ✅ shipped 2026-07-26. Wikipedia's editors are, in effect, a large and unusually careful dead-link detector, and the dumps record their output for free — no requests to anyone. Editors remove citations for reasons that correlate with what this tool hunts: the site died, the content vanished, the domain got parked, a bot swapped in an archive.
+
+`link_diffs` (migration 5) is append-only like every other observation table, holding two transitions per run pair. Removal adds **+7** to a domain's score — more than the `{{dead link}}` tag's +5, because tagging is a note and removal is an act — and gets its own `wiki_removed` export column rather than only a line in `score_explanation`, since it is the one piece of evidence in the file that came from a human who looked at the page. It is corroboration and **never sets a state**; links also get dropped when a paragraph is rewritten or a source upgraded. A test asserts a removal cannot move a `live` URL or an `active` domain.
+
+**The load-bearing decision was what *not* to compare.** wikimill ingests slices, so a page absent from the newer run may have been deleted or may simply never have been ingested — indistinguishable from inside the database, and opposite in meaning. Treating that as removal would manufacture one high-confidence false positive per link on every page the operator chose not to ingest, which is the most expensive error this project can make. So the comparison is scoped to the **intersection of the two runs' pages**, and everything outside it is reported as a *not comparable* coverage number. `page_deleted` is absent by design, not by omission, and five tests exist purely to prove a partial ingest cannot fabricate a signal.
+
+No new verb: the diff runs inside `ingest` — the moment a second run lands is exactly when the comparison becomes possible and when the operator wants it — and `stats --diff` displays it. Both read tables only.
+
+**Not yet validated against real data.** Only `20260701` is ingested, so `stats --diff` correctly reports "needs two ingested dump runs". The logic is covered by 26 hermetic tests and migration 5 applied cleanly to the real 135,591-domain database, but the *signal itself* — how often editors drop a citation, and how well that predicts a dead domain — is unmeasured until a second dump is ingested. That is the next real-data question this tier raises.
 
 **v2.I** — ✅ shipped 2026-07-26, out of tier order. Stage 5 was the last sequential stage, at 1.36 domains/sec, making a 112,349-domain tail sweep a 23-hour job. Now **9.46/sec measured on 300 real domains — 7× faster**, bringing the sweep to ~3.3 hours.
 

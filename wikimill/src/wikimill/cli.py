@@ -24,6 +24,7 @@ from .domain import runner as domain_stage
 from .enrich import runner as enrich_stage
 from . import export as export_mod
 from . import inspect as inspect_mod
+from . import diff as diff_mod
 from . import policy as policy_mod
 from . import schedule as schedule_mod
 from . import score as score_mod
@@ -126,6 +127,14 @@ def stats(
                  "pick up now, and what is waiting. Reads the DB only.",
         ),
     ] = False,
+    diff_out: Annotated[
+        bool,
+        typer.Option(
+            "--diff",
+            help="Show what Wikipedia editors added and removed between the two "
+                 "most recent ingested dump runs.",
+        ),
+    ] = False,
 ) -> None:
     """Row counts by table, queue depth, and recent runs."""
     cfg = load_config()
@@ -135,6 +144,7 @@ def stats(
         table_counts = counts(conn)
         version = user_version(conn)
         buckets = schedule_mod.snapshot(conn) if due else None
+        diff_view = _diff_view(conn) if diff_out else None
     if json_out:
         payload: dict = {"schema_version": version, "counts": table_counts}
         if buckets:
@@ -150,6 +160,8 @@ def stats(
                 }
                 for queue, b in buckets.items()
             }
+        if diff_view is not None:
+            payload["diff"] = diff_view
         typer.echo(jsonlib.dumps(payload, indent=2))
         return
     typer.echo(f"schema v{version}  ·  {cfg.db_path}")
@@ -160,6 +172,43 @@ def stats(
         typer.echo("\nEmpty — run `wikimill ingest` once v1.C ships.")
     if buckets:
         _print_schedule(buckets)
+    if diff_view is not None:
+        _print_diff(diff_view)
+
+
+def _diff_view(conn) -> dict:
+    """Stored transitions between the two most recent ingested runs."""
+    runs = diff_mod.list_runs(conn)
+    view: dict = {"runs": runs}
+    if len(runs) < 2:
+        return view
+    from_run, to_run = runs[-2], runs[-1]
+    view["from_run"], view["to_run"] = from_run, to_run
+    view["transitions"] = diff_mod.summary(conn, from_run, to_run)
+    view["top_removed_domains"] = [
+        {"domain": d, "removed": n}
+        for d, n in diff_mod.top_removed_domains(conn, from_run, to_run)
+    ]
+    return view
+
+
+def _print_diff(view: dict) -> None:
+    runs = view.get("runs", [])
+    typer.echo("\ncross-dump-run diff")
+    typer.echo(f"  ingested runs              {', '.join(runs) if runs else '(none)'}")
+    if len(runs) < 2:
+        # Not a failure. One run is the normal state until a second dump lands.
+        typer.echo("  → needs two ingested dump runs; nothing to compare yet")
+        return
+    typer.echo(f"  comparing                  {view['from_run']} → {view['to_run']}")
+    transitions = view.get("transitions", {})
+    for name in (diff_mod.REMOVED, diff_mod.ADDED):
+        typer.echo(f"  {name:<26} {transitions.get(name, 0):>12,}")
+    top = view.get("top_removed_domains") or []
+    if top:
+        typer.echo("  most-dropped domains:")
+        for entry in top:
+            typer.echo(f"    {entry['domain']:<24} {entry['removed']:>12,}")
 
 
 def _print_schedule(buckets) -> None:

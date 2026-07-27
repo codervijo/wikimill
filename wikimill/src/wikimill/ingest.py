@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .config import Config
+from . import diff
 from .constants import NORMALIZER_VERSION, RunKind, UrlState
 from .errors import DumpError
 from .logging import RunLog, utcnow
@@ -55,6 +56,7 @@ class IngestStats:
     dropped: dict[str, int] = field(default_factory=dict)
     malformed: int = 0
     malformed_examples: list[str] = field(default_factory=list)
+    diff: object | None = None   # DiffStats once a second run exists (v2.G)
 
     def note_scheme(self, scheme: str) -> None:
         self.skipped_scheme[scheme] = self.skipped_scheme.get(scheme, 0) + 1
@@ -461,8 +463,54 @@ def run(
                 "malformed rows",
                 f"{stats.malformed:,} skipped (e.g. {stats.malformed_examples[0]})",
             )
+        stats.diff = _diff_against_previous(conn, log, dump_run)
         _record_run(conn, log, stats)
     return stats
+
+
+def _diff_against_previous(
+    conn: sqlite3.Connection, log: RunLog, dump_run: str
+) -> "diff.DiffStats | None":
+    """Compare this run with the newest older one (v2.G).
+
+    Done here rather than behind its own verb because a diff is a property of
+    an ingest: the moment a second run lands is exactly when the comparison
+    becomes possible and exactly when the operator wants it. It reads only
+    tables — no dump files, no network — so it costs a couple of indexed
+    queries on top of work already done.
+    """
+    previous = diff.previous_run(conn, dump_run)
+    if previous is None:
+        log.note("no earlier dump run to compare against — diff available from the next one")
+        return None
+
+    result = diff.compute(conn, previous, dump_run)
+    if not result.comparable:
+        log.warn(
+            "diff",
+            f"{previous} → {dump_run}: no page appears in both runs, nothing comparable",
+        )
+        return result
+
+    log.ok(
+        "diff",
+        f"{previous} → {dump_run} · {result.pages_compared:,} page(s) in both",
+    )
+    if result.removed:
+        # The signal this stage exists for.
+        log.ok(
+            "editors removed",
+            f"{result.removed:,} citation(s) — corroboration that those links died",
+        )
+    if result.added:
+        log.progress(f"{result.added:,} citation(s) added")
+    if result.pages_not_comparable:
+        log.warn(
+            "not comparable",
+            f"{result.pages_not_comparable:,} page(s) absent from {dump_run} — "
+            "deleted or never ingested, indistinguishable from here, so excluded",
+        )
+    return result
 
 
 def _record_run(conn: sqlite3.Connection, log: RunLog, stats: IngestStats) -> None:
