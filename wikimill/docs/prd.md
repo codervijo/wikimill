@@ -282,7 +282,7 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 | v2.B | ✅ done | **`wikimill.toml` policy config**: loader, validation with typed errors, `config show` / `config validate`, `.example` file |
 | v2.C | ✅ done | **Move the policy constants into it**: export candidate states, `--min-pages` floor, scoring weights (§ `score.py`), enrichment trigger sets, recheck cadences, expiry watch window, per-host delay and concurrency |
 | v2.D | ✅ done | **Operator-editable marker lists**: parking/for-sale/soft-404 signatures, tracking-parameter list, Wikimedia + resolver exclusion lists — with a `CLASSIFIER_VERSION` bump on change so verdicts stay auditable |
-| v2.E | ⏳ planned | Recheck scheduler (§12): `next_check_at`, tiered cadences, `--due` selection, terminal-record protection |
+| v2.E | ✅ done | Recheck scheduler (§12): `next_check_at`, tiered cadences, `--due` selection, terminal-record protection |
 | v2.F | ⏳ planned | `exturlusage` verification pass before export ("does enwiki still link here?") |
 | v2.G | ⏳ planned | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
 | v2.H | ⏳ planned | Enrichment cache: keep decompressed blocks warm across runs when re-enriching a new dump run |
@@ -314,6 +314,16 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 * **A circular import.** `policy.py` read its defaults from the modules that consume it. The marker vocabularies moved to a leaf `markers.py` and the domain-check defaults to `constants.py` — data one hop below both, rather than an import hidden inside a function.
 
 **Not made tunable, deliberately** — the safety invariants of §18 remain code: per-domain concurrency of 1, redirect and body-size caps, the two-resolver rule for `unregistered`, robots.txt obedience. `test_policy.py::test_safety_invariants_are_not_configurable` fails if any of them acquires a key.
+
+**v2.E** — ✅ shipped 2026-07-26. Most of §12 already existed by v1.G: `next_check_at`, the cadence table, terminal-record protection, `--force`. What was missing were three things, and the first two were defects rather than absences.
+
+**Ordering *is* the scheduler.** Selection was ordered by age alone. At 1,326,045 URLs every run is `--limit`-capped, so a due `for_sale` record queueing behind a hundred thousand due `live` ones is the difference between finding it this week and never finding it. Both queues now order by candidate value, then oldest — and the value comes from the operator's existing `[scoring]` weights rather than a second priority table, because a ranking that could disagree with the export order would be a trap. On the domain side this fixes a concrete inversion: `wiki_page_count DESC` alone let a heavily-cited `unknown` domain bury an `expiring` one, which is the single state whose whole point is that its window is closing. **18 domains were sitting in exactly that state on the real corpus.**
+
+**`temporarily_unavailable` retried hourly, forever.** §12 has specified "1h, exponential ×2, cap 24h, then re-queue at 7 days" since v1.A; only the 1h was built. A host down for a week collected 168 requests from us on the theory it might return any minute — a politeness failure aimed precisely at the site least able to absorb it, and the failure mode is invisible from our side because nothing errors. **9 URLs were in that state on the real corpus.** Now implemented in full, ceilings tunable.
+
+**The queue is now observable without running it.** `stats --due` reports both queues as five disjoint buckets — never checked / due now / due within 7d / due later / terminal — plus which states are due, because a bare count is not actionable: three due `for_sale` records justify a run that a hundred thousand due `live` ones do not. No new verb; `stats` gains a flag. It reads the database and makes no requests, so the cheapest question the operator has stops costing a crawl against real hosts.
+
+Adding the two escalation ceilings to `[classify]` shifted the policy fingerprint (`1+4458ff725a4c` → `1+00652c9f0efd`), so the next `crawl --reclassify` will re-judge the 440 stored verdicts. That is the fingerprint working as designed — cadences live in a classifying section — and it is cheap here, but it is worth knowing the rule bites on scheduling changes too, not only on marker edits.
 
 **v2.I** — ✅ shipped 2026-07-26, out of tier order. Stage 5 was the last sequential stage, at 1.36 domains/sec, making a 112,349-domain tail sweep a 23-hour job. Now **9.46/sec measured on 300 real domains — 7× faster**, bringing the sweep to ~3.3 hours.
 
@@ -564,6 +574,10 @@ Selection is a single ordered query: records where `terminal = 0 AND next_check_
 | `expiring` (domain) | 1 day | The window we actually care about |
 
 `--force` overrides everything, including terminality, and is the only way to re-check a terminal record. Every forced run is logged as such in `crawl_runs`.
+
+**Candidate value comes from `[scoring]`** (v2.E), not a separate priority table. The operator has already declared what a state is worth; a second ranking that could disagree would surface candidates in one order and revisit them in another, with no way to tell which was intended. Never-checked records still lead both queues — a record with no observation at all is the cheapest information available.
+
+**`stats --due` shows the schedule without running it** (v2.E): five disjoint buckets per queue — never checked / due now / due within 7d / due later / terminal — plus which states are due. Database only, no requests. "Is there anything to do?" is the cheapest question the operator has and must not cost a crawl against real hosts to answer.
 
 ## 13. Error handling and retry behavior
 

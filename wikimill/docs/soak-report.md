@@ -6,7 +6,7 @@ rather than carrying an estimate.
 
 ## 1. Acceptance criteria
 
-Criteria 1, 2, 4, 12, 13, 16, 19–22 are covered by the 482-test suite and by the
+Criteria 1, 2, 4, 12, 13, 16, 19–22 are covered by the 505-test suite and by the
 live verification recorded in `prd.md` §7 design notes. The criteria below need a
 real corpus, and were re-verified by a harness over the live database.
 

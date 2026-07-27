@@ -110,6 +110,9 @@ class Classify:
         default_factory=lambda: {str(k): v for k, v in constants.RECHECK_INTERVALS.items()}
     )
     hard_404_confirmations: int = constants.HARD_404_CONFIRMATIONS
+    hard_404_backoff_cap_seconds: int = constants.HARD_404_BACKOFF_CAP_SECS
+    transient_cap_seconds: int = constants.TRANSIENT_CAP_SECS
+    transient_requeue_seconds: int = constants.TRANSIENT_REQUEUE_SECS
     default_recheck_seconds: int = constants.DEFAULT_RECHECK_SECS
     thin_body_bytes: int = markers.THIN_BODY_BYTES
 

@@ -17,8 +17,11 @@ import sqlite3
 
 from ..constants import (
     DEFAULT_RECHECK_SECS,
+    HARD_404_BACKOFF_CAP_SECS,
     HARD_404_CONFIRMATIONS,
     RECHECK_INTERVALS,
+    TRANSIENT_CAP_SECS,
+    TRANSIENT_REQUEUE_SECS,
     UrlState,
 )
 from ..logging import utcnow
@@ -38,16 +41,38 @@ _FAILURE_STATES = frozenset(
 def recheck_seconds(classification: str, *, repeats: int = 0, policy=None) -> int:
     """How long until this URL is due again.
 
-    `hard_404` doubles with each repeat (capped at 180 days) — a page that has
-    been gone for a year does not need monthly confirmation. Everything else
-    uses its configured cadence unchanged, because the value of a `parked` or
-    `for_sale` observation is in its freshness.
+    Two states escalate on repeat; everything else uses its configured cadence
+    unchanged, because the value of a `parked` or `for_sale` observation is in
+    its freshness.
+
+    * `hard_404` doubles per repeat, capped — a page gone for a year does not
+      need monthly confirmation.
+    * `temporarily_unavailable` doubles from one hour, and once doubling would
+      pass the cap it **stops escalating and re-queues at the weekly interval**
+      (prd.md §12). Without that second step a host down for a week collects
+      168 requests from us on the theory that it might come back any minute.
+      That is a politeness failure, not just a scheduling one — the flat hourly
+      retry is at its worst exactly when the far end is least able to serve it.
     """
-    cadences = policy.classify.recheck_seconds if policy else RECHECK_INTERVALS
-    fallback = policy.classify.default_recheck_seconds if policy else DEFAULT_RECHECK_SECS
+    c = policy.classify if policy else None
+    cadences = c.recheck_seconds if c else RECHECK_INTERVALS
+    fallback = c.default_recheck_seconds if c else DEFAULT_RECHECK_SECS
     base = cadences.get(str(classification), fallback)
-    if classification == UrlState.HARD_404 and repeats > 0:
-        return min(base * (2**repeats), 180 * 86_400)
+
+    if repeats <= 0:
+        return base
+
+    if classification == UrlState.HARD_404:
+        cap = c.hard_404_backoff_cap_seconds if c else HARD_404_BACKOFF_CAP_SECS
+        return min(base * (2**repeats), cap)
+
+    if classification == UrlState.TEMPORARILY_UNAVAILABLE:
+        cap = c.transient_cap_seconds if c else TRANSIENT_CAP_SECS
+        escalated = base * (2**repeats)
+        if escalated > cap:
+            return c.transient_requeue_seconds if c else TRANSIENT_REQUEUE_SECS
+        return escalated
+
     return base
 
 

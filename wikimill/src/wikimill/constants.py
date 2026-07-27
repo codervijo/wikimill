@@ -154,6 +154,13 @@ EXPIRY_WATCH_DAYS: Final = 60
 
 # Consecutive identical `hard_404` verdicts before a URL stops being checked.
 HARD_404_CONFIRMATIONS: Final = 3
+
+# Ceilings on the two escalating cadences (prd.md §12).
+HARD_404_BACKOFF_CAP_SECS: Final = 180 * _DAY
+# `temporarily_unavailable` doubles from 1h; past this it stops escalating and
+# re-queues at the weekly interval instead of retrying an unhealthy host hourly.
+TRANSIENT_CAP_SECS: Final = 24 * 3_600
+TRANSIENT_REQUEUE_SECS: Final = 7 * _DAY
 DEFAULT_RECHECK_SECS: Final = 30 * _DAY
 
 # Consecutive transient failures against one host before it is cooled.

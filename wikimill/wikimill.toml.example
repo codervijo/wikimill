@@ -77,6 +77,15 @@
 # hard_404_confirmations = 3
 # default_recheck_seconds = 2592000
 # thin_body_bytes = 512
+#
+# Two states escalate on repeat instead of using a flat cadence (§12).
+# hard_404 doubles per repeat up to this ceiling — 180 days:
+# hard_404_backoff_cap_seconds = 15552000
+# temporarily_unavailable doubles from 1h; once doubling would pass the cap it
+# stops escalating and re-queues at the weekly interval, rather than knocking
+# on an unhealthy host every day forever:
+# transient_cap_seconds = 86400
+# transient_requeue_seconds = 604800
 
 # [classify.recheck_seconds]
 #   unregistered = 259200

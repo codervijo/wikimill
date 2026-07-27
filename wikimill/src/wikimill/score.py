@@ -91,6 +91,35 @@ class Score:
         )
 
 
+def priority_case(column: str, weights: dict[str, int]) -> tuple[str, list]:
+    """A SQL `CASE` ranking `column` by the operator's own state weights.
+
+    Used by the schedulers (prd.md §12: "ordered by candidate value, oldest
+    first"). Ordering *is* the scheduler once the corpus outgrows any one run:
+    at 1.3M URLs every invocation is capped by `--limit`, so a due
+    `unregistered` record queueing behind a hundred thousand due `live` ones is
+    the difference between finding it this week and never.
+
+    The weights come from `[scoring]`, deliberately, rather than a second
+    priority table in the config. The operator has already declared what a
+    state is worth; a separate ranking that could disagree with the export
+    order would be a trap — candidates would surface in one order and be
+    revisited in another, with no way to tell which was intended.
+
+    `column` is interpolated and so must be caller-supplied, never user input;
+    every *value* is a bound parameter.
+    """
+    if not weights:
+        return "0", []
+    fragment = ["CASE " + column]
+    params: list = []
+    for state, points in weights.items():
+        fragment.append("WHEN ? THEN ?")
+        params.extend([str(state), int(points)])
+    fragment.append("ELSE 0 END")
+    return " ".join(fragment), params
+
+
 def score_domain(
     row: sqlite3.Row,
     url_states: dict[str, int],

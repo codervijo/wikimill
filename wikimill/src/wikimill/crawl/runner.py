@@ -34,6 +34,7 @@ from ..constants import RunKind, UrlState
 from ..errors import CrawlError
 from ..logging import RunLog, utcnow
 from ..policy import load as load_policy
+from ..score import URL_DEATH_POINTS, priority_case
 from ..storage import open_db
 from . import robots as robots_mod
 from .fetcher import FetchResult, build_client, fetch
@@ -63,24 +64,38 @@ class _Task:
     domain: str
 
 
-def select_due(conn: sqlite3.Connection, limit: int | None, force: bool) -> list[_Task]:
+def select_due(
+    conn: sqlite3.Connection, limit: int | None, force: bool, policy=None
+) -> list[_Task]:
     """Pick non-terminal URLs whose recheck window has opened.
 
     Terminal records are excluded unless `--force`, which is the only way to
     revisit them (prd.md §12).
+
+    Ordered by **candidate value, then oldest first** (v2.E). Never-checked URLs
+    still lead — a URL with no observation at all is the cheapest information
+    available — but among records that *have* been seen, a due `for_sale` is
+    picked up before a due `live`.
     """
+    weights = policy.scoring.url_death_points if policy else URL_DEATH_POINTS
+    priority, priority_params = priority_case("u.state", weights)
     sql = [
         "SELECT u.url_hash, u.url_normalized, COALESCE(d.registrable_domain, '') AS dom",
         "FROM urls u LEFT JOIN domains d ON d.domain_id = u.domain_id",
     ]
+    params: list = []
     where = []
     if not force:
         where.append("u.terminal = 0")
         where.append("(u.next_check_at IS NULL OR u.next_check_at <= ?)")
+        params.append(utcnow())
     if where:
         sql.append("WHERE " + " AND ".join(where))
-    sql.append("ORDER BY u.last_checked IS NOT NULL, u.last_checked, u.url_hash")
-    params: list = [] if force else [utcnow()]
+    sql.append(
+        f"ORDER BY u.last_checked IS NOT NULL, {priority} DESC, "
+        "u.last_checked, u.url_hash"
+    )
+    params.extend(priority_params)
     if limit is not None:
         sql.append("LIMIT ?")
         params.append(limit)
@@ -308,7 +323,7 @@ def run(
     workers = max(1, concurrency or policy.crawl.concurrency)
 
     with open_db(cfg.db_path) as conn:
-        tasks = select_due(conn, limit, force)
+        tasks = select_due(conn, limit, force, policy)
         stats.considered = len(tasks)
         if not tasks:
             log.warn("queue", "nothing due — every URL is within its recheck window")

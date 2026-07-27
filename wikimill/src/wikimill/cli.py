@@ -25,6 +25,7 @@ from .enrich import runner as enrich_stage
 from . import export as export_mod
 from . import inspect as inspect_mod
 from . import policy as policy_mod
+from . import schedule as schedule_mod
 from . import score as score_mod
 from .config import load as load_config
 from .constants import EXIT_INTERRUPTED, EXIT_OK, RunKind
@@ -117,6 +118,14 @@ def stats(
     json_out: Annotated[
         bool, typer.Option("--json", help="Emit as JSON on stdout.")
     ] = False,
+    due: Annotated[
+        bool,
+        typer.Option(
+            "--due",
+            help="Show the recheck schedule: what `crawl` and `check` would "
+                 "pick up now, and what is waiting. Reads the DB only.",
+        ),
+    ] = False,
 ) -> None:
     """Row counts by table, queue depth, and recent runs."""
     cfg = load_config()
@@ -125,12 +134,23 @@ def stats(
     with open_db(cfg.db_path) as conn:
         table_counts = counts(conn)
         version = user_version(conn)
+        buckets = schedule_mod.snapshot(conn) if due else None
     if json_out:
-        typer.echo(
-            jsonlib.dumps(
-                {"schema_version": version, "counts": table_counts}, indent=2
-            )
-        )
+        payload: dict = {"schema_version": version, "counts": table_counts}
+        if buckets:
+            payload["schedule"] = {
+                queue: {
+                    "never_checked": b.never,
+                    "due_now": b.due,
+                    f"due_within_{schedule_mod.SOON_DAYS}d": b.soon,
+                    "due_later": b.later,
+                    "terminal": b.terminal,
+                    "actionable": b.actionable,
+                    "due_by_state": b.due_by_state,
+                }
+                for queue, b in buckets.items()
+            }
+        typer.echo(jsonlib.dumps(payload, indent=2))
         return
     typer.echo(f"schema v{version}  ·  {cfg.db_path}")
     width = max((len(k) for k in table_counts), default=0)
@@ -138,6 +158,28 @@ def stats(
         typer.echo(f"  {table:<{width}}  {count:>12,}")
     if not any(table_counts.values()):
         typer.echo("\nEmpty — run `wikimill ingest` once v1.C ships.")
+    if buckets:
+        _print_schedule(buckets)
+
+
+def _print_schedule(buckets) -> None:
+    """The §12 selection rule, made observable without running it."""
+    soon = schedule_mod.SOON_DAYS
+    for queue, b in buckets.items():
+        typer.echo(f"\n{queue} — recheck schedule")
+        for label, value in (
+            ("never checked", b.never),
+            ("due now", b.due),
+            (f"due within {soon}d", b.soon),
+            ("due later", b.later),
+            ("terminal (needs --force)", b.terminal),
+        ):
+            typer.echo(f"  {label:<26} {value:>12,}")
+        typer.echo(f"  {'→ a run would touch':<26} {b.actionable:>12,}")
+        if b.due_by_state:
+            typer.echo("  due now, by state:")
+            for state, n in b.due_by_state.items():
+                typer.echo(f"    {state:<24} {n:>12,}")
 
 
 # --------------------------------------------------------------------------

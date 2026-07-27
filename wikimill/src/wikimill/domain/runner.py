@@ -38,6 +38,7 @@ from ..constants import (
 )
 from ..logging import RunLog, utcnow
 from ..policy import Policy
+from ..score import STATE_POINTS, priority_case
 from ..policy import load as load_policy
 from ..storage import open_db
 from . import dns as dns_mod
@@ -101,11 +102,18 @@ def select_domains(
         where.append("(d.next_check_at IS NULL OR d.next_check_at <= ?)")
         params.append(utcnow())
 
+    # Candidate value first, then citation count, then oldest (prd.md §12).
+    # `wiki_page_count` alone let a heavily-cited `unknown` domain outrank an
+    # `expiring` one — the single state where the recheck window is the point.
+    weights = policy.scoring.state_points if policy else STATE_POINTS
+    priority, priority_params = priority_case("d.state", weights)
     sql = (
         "SELECT d.domain_id, d.registrable_domain FROM domains d WHERE "
         + " AND ".join(where)
-        + " ORDER BY d.last_checked IS NOT NULL, d.wiki_page_count DESC, d.domain_id"
+        + f" ORDER BY d.last_checked IS NOT NULL, {priority} DESC,"
+          " d.wiki_page_count DESC, d.domain_id"
     )
+    params.extend(priority_params)
     if limit is not None:
         sql += " LIMIT ?"
         params.append(limit)
