@@ -2,7 +2,16 @@
 
 The canonical source of truth for purpose, scope, phases, and conformance. Code that contradicts this doc is drift, not feature.
 
-> **Status: APPROVED 2026-07-25.** `v1.A` (planning) is this document. **v1 is complete** — `v1.A`–`v1.J` all shipped. Soak measurements and the operator's verdict on the finds are in `docs/soak-report.md`; v2 is next.
+> **Status: COMPLETE 2026-07-27.** Approved 2026-07-25; `v1.A` (planning) is this document.
+> **v1** (`v1.A`–`v1.J`), **v2** (`v2.A`–`v2.I`) and **v3** (`v3.A`–`v3.B`) all shipped —
+> eight pipeline stages, eleven commands, 607 hermetic tests. Four planned v3 phases were
+> **dropped rather than delivered** once the operator stated the real requirement; that is
+> recorded in the v3 section as an outcome, not hidden as a gap.
+>
+> Measurements and the operator's verdict on the finds are in `docs/soak-report.md`. The
+> honest limits of what has been measured are restated in §7 under v3 and in the README —
+> chiefly that the corpus is one slice of one dump run, and that the HTTP crawl has covered
+> ~0.04% of its queue, so every candidate found so far came from DNS + RDAP.
 
 ## 1. Purpose
 

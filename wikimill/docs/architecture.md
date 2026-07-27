@@ -2,7 +2,7 @@
 
 How this project is built. Mechanisms, schemas, modules, and integrations. The "HOW" companion to `docs/prd.md`'s "WHY / WHAT".
 
-Status: **v1 complete (v1.A–v1.J).** All eight pipeline stages and all nine CLI commands implemented, soaked against the full 4.9 GB dump — see `docs/soak-report.md`. v2 next. Everything below marked *(vN.X)* is planned, not built.
+Status: **complete — v1, v2 and v3 shipped.** All eight pipeline stages and eleven CLI commands implemented, soaked against the full 4.9 GB dump — see `docs/soak-report.md`. 607 hermetic tests. Phase markers *(vN.X)* below record when a mechanism arrived, not what is outstanding.
 
 ## 1. Project layout
 

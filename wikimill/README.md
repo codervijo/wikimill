@@ -12,17 +12,46 @@ finds both, preserves the Wikipedia evidence, and exports a candidate file.
 
 ## Status
 
-**v1.B shipped** — scaffold, config, storage, preflight, launcher. `preflight` and
-`stats` work today; the pipeline arrives from v1.C. See `docs/prd.md` §7 for the roadmap.
+**Complete — v1, v2 and v3 shipped.** All eight pipeline stages, eleven commands,
+607 hermetic tests. Soaked against the full 4.9 GB `externallinks` dump.
+
+| | |
+|---|---|
+| Corpus | 27,152 Wikipedia pages → 1,433,427 links → 1,326,045 URLs → 135,591 domains |
+| Found | **1,392 `unregistered` + 310 `expiring`**; 2,967 rows across all candidate states |
+| Tuning | every threshold, weight and marker list is editable in `wikimill.toml` |
+| Output | filterable offline HTML page, plus CSV/JSONL export |
+
+**Known limits, stated rather than buried.** The corpus is one 27,152-page slice of
+one dump run, so cross-run and live-wiki signals are conservative lower bounds rather
+than full measurements. The HTTP crawl has run over ~0.04% of the URL queue — every
+candidate above came from DNS + RDAP, which swept the whole corpus in 1.9 h, while a
+full crawl is a ~25-day job bounded by politeness. `for_sale` and `parked` are
+therefore near-zero because only the crawl can produce them. See `docs/soak-report.md`.
 
 ## Run (in Docker — crawlers always run in Docker)
 
 ```sh
 cp wikimill.env.example wikimill.env    # then set WIKIMILL_CONTACT
 ./bin/wikimill preflight                # doctor: config, database, dumps
-./bin/wikimill stats                    # row counts by table
-./bin/wikimill shell                    # interactive container (debug)
+./bin/wikimill ingest                   # 1-2: dump -> links, normalized
+./bin/wikimill crawl                    # 3-4: fetch + classify what is due
+./bin/wikimill check                    # 5: DNS + RDAP; the only source of `unregistered`
+./bin/wikimill enrich                   # 6: Wikipedia context, for candidates only
+./bin/wikimill export                   # 7: candidates.csv, with full evidence
+./bin/wikimill report                   # 8: outputs/report.html — filterable, offline
 ```
+
+Watching a long run — the page reloads itself while a stage is live:
+
+```sh
+./bin/wikimill report --watch 10        # regenerate every 10s; shows stalls
+./bin/wikimill stats --due              # what crawl/check would pick up now
+./bin/wikimill stats --diff             # what editors added/removed between dumps
+```
+
+Also available: `namespaces`, `inspect`, `config show|validate`, and
+`./bin/wikimill shell` for an interactive container.
 
 Optional — run from any directory (always uses the latest source, no reinstall):
 
