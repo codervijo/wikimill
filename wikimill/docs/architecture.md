@@ -54,6 +54,7 @@ wikimill/
 │   │   └── runner.py          #   selection, pacing, single writer
 │   ├── enrich/                # v1.H: stage 6, the deferred expensive half
 │   │   ├── select.py          #   what deserves it — and the empty fast path
+│   │   ├── cache.py          #   v2.H: wikitext kept, so re-enrich is offline
 │   │   ├── seek.py            #   offset -> one bz2 block -> pages
 │   │   ├── wikitext.py        #   section, anchor, ref/cite context
 │   │   └── runner.py          #   block batching, single writer
@@ -62,7 +63,7 @@ wikimill/
 │   ├── score.py               # v1.I: explainable ranking (never exclusion)
 │   ├── inspect.py             # v1.I: everything known about one thing
 │   └── export.py              # v1.I: deterministic, attributable candidate file
-├── tests/                     # 531 tests, hermetic (no network, no Docker)
+├── tests/                     # 552 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -237,7 +238,7 @@ registrar pages are never scraped.
 
 ## 8. Storage
 
-SQLite, single file, WAL, at `state/wikimill.db`. Twelve tables (schema in `storage/schema.py`, documented in `prd.md` §9).
+SQLite, single file, WAL, at `state/wikimill.db`. Thirteen tables (schema in `storage/schema.py`, documented in `prd.md` §9).
 
 **Load-bearing invariants:**
 
@@ -262,6 +263,14 @@ Variables split across two layers, and the launcher handles both:
 The launcher forwards every other host `WIKIMILL_*` variable with `-e` *after* `--env-file`, which is what preserves the precedence rule. (Omitting this was a real bug caught in v1.B soak: inline overrides silently stopped at the host.)
 
 **Secrets.** None are needed at v1, but the whole path is built: gitignored `wikimill.env`, committed `.example` with no real values, and redaction of any variable matching `*_KEY|*_TOKEN|*_SECRET|*_PASSWORD` across `preflight`, `--json`, logs, and `crawl_runs.args`. Retrofitting this around a key that has already been committed once is far more expensive.
+
+### 3a. The enrichment page cache (v2.H)
+
+`page_cache` keeps the wikitext of pages enrichment has already read. Its value is less about speed — a block decompresses in about a quarter-second — than about symmetry with classification: `crawl --reclassify` re-judges stored observations with no network, and extraction now has the same property. An improved `wikitext.py` rule re-applies to every past candidate with **no archive, no seek and no decompression**, and a fully-cached batch never opens the archive at all.
+
+**Keyed on `(dump_run, page_id, lang)`, never on `ms_offset`.** Offset X in one run's archive is a different block from offset X in another's, and article text changes between runs — an offset-keyed cache would serve one revision's wikitext for a link recorded against another. That is what `check_dump_runs_agree` refuses at ingest; here it would be silent.
+
+Derived and disposable: every row regenerates from the archive, so eviction is plain LRU against a byte budget and clearing costs time rather than information. Redirect stubs are never stored. `--no-cache` forces a read from the dump; `[enrich] cache_enabled` and `cache_max_bytes` are the knobs.
 
 ### 8a. Cross-dump-run diff (v2.G)
 
@@ -337,7 +346,7 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 13. Testing
 
-531 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+552 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness

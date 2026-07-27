@@ -285,7 +285,7 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 | v2.E | ✅ done | Recheck scheduler (§12): `next_check_at`, tiered cadences, `--due` selection, terminal-record protection |
 | v2.F | ⏳ planned | `exturlusage` verification pass before export ("does enwiki still link here?") |
 | v2.G | ✅ done | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
-| v2.H | ⏳ planned | Enrichment cache: keep decompressed blocks warm across runs when re-enriching a new dump run |
+| v2.H | ✅ done | Enrichment cache: keep decompressed blocks warm across runs when re-enriching a new dump run |
 | v2.I | ✅ done | **Parallel domain checks** — pulled forward ahead of `v2.A` because the v1.J tail sweep needed it |
 
 **v2.A** — ✅ planned 2026-07-26, unblocked by the operator finding candidates worth pursuing. The tier's load-bearing decision is **where the line falls between policy and code**, and it is not arbitrary.
@@ -334,6 +334,16 @@ Adding the two escalation ceilings to `[classify]` shifted the policy fingerprin
 No new verb: the diff runs inside `ingest` — the moment a second run lands is exactly when the comparison becomes possible and when the operator wants it — and `stats --diff` displays it. Both read tables only.
 
 **Not yet validated against real data.** Only `20260701` is ingested, so `stats --diff` correctly reports "needs two ingested dump runs". The logic is covered by 26 hermetic tests and migration 5 applied cleanly to the real 135,591-domain database, but the *signal itself* — how often editors drop a citation, and how well that predicts a dead domain — is unmeasured until a second dump is ingested. That is the next real-data question this tier raises.
+
+**v2.H** — ✅ shipped 2026-07-26, and the framing changed while building it. The phase was written as throughput — keep blocks warm, re-enrich faster. That win is real but modest: a block decompresses in about a quarter-second, and the cheapest-first ordering means most links never reach this stage.
+
+**The larger win is that enrichment becomes re-runnable offline**, which is the property classification has had since v1.F. `crawl --reclassify` re-judges every stored observation with an improved classifier and refetches nothing (architecture.md §2). Extraction had no equivalent: improving `wikitext.py`'s section or citation-kind rules meant re-seeking a 26.6 GB archive — one that lives on an external drive which, as of this writing, **is not currently mounted**. With the wikitext of already-read pages kept, that improvement re-applies to every past candidate with no archive, no seek and no decompression, and if every candidate page is cached `enrich` never opens the archive at all. A test asserts exactly that, using an empty dumps directory so a stray archive read would raise.
+
+**The key is `(dump_run, page_id, lang)` — never the byte offset.** Offset X in one run's archive is a different block from offset X in another's, and an article's text genuinely changes between runs. An offset-keyed cache would hand one revision's wikitext to a link recorded against another, which is what `check_dump_runs_agree` refuses at ingest, except silently and after the fact.
+
+The cache is derived and disposable, so eviction is plain LRU against a byte budget (256 MB default, both knobs in `[enrich]`), `--no-cache` forces a read from the dump, and clearing it costs time rather than information. Redirect stubs are never stored — they carry no citation context and would masquerade as cached articles.
+
+Two things fixed in passing: eviction deleted a whole 100-row batch regardless of the actual overshoot, which would have made the cache useless at any size near its cap; and `enrich --dry-run` required the archive to exist merely to report what it *would* read. Asking what a run would cost is what an operator does **before** deciding whether to go and plug the drive in, so refusing to answer because the drive is unplugged inverts the point. It now reports the plan either way.
 
 **v2.I** — ✅ shipped 2026-07-26, out of tier order. Stage 5 was the last sequential stage, at 1.36 domains/sec, making a 112,349-domain tail sweep a 23-hour job. Now **9.46/sec measured on 300 real domains — 7× faster**, bringing the sweep to ~3.3 hours.
 

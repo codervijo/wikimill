@@ -32,6 +32,10 @@ class Candidate:
     title: str
     url_raw: str
     url_state: str
+    # Carried rather than looked up per candidate: it keys the page cache
+    # (v2.H), and a per-row query inside the block loop was doing the same
+    # work once per link instead of once per selection.
+    dump_run: str = ""
 
 
 def parse_states(states: str | None, policy=None) -> list[str]:
@@ -102,7 +106,7 @@ def select(
                            else DOMAIN_ENRICH_TRIGGER_STATES)
     params: list = [*states, *domain_states]
     sql = [
-        "SELECT e.id, e.page_id, p.ms_offset, p.title, e.url_raw, u.state",
+        "SELECT e.id, e.page_id, p.ms_offset, p.title, e.url_raw, u.state, e.dump_run",
         "FROM external_links e",
         "JOIN urls u ON u.url_hash = e.url_hash",
         "LEFT JOIN domains d ON d.domain_id = u.domain_id",
@@ -121,7 +125,8 @@ def select(
         sql.append("LIMIT ?")
         params.append(limit)
     return [
-        Candidate(r["id"], r["page_id"], r["ms_offset"], r["title"], r["url_raw"], r["state"])
+        Candidate(r["id"], r["page_id"], r["ms_offset"], r["title"], r["url_raw"],
+                  r["state"], r["dump_run"])
         for r in conn.execute("\n".join(sql), params)
     ]
 

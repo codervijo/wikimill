@@ -306,12 +306,41 @@ MIGRATION_5: Final[tuple[str, ...]] = (
     "CREATE INDEX idx_link_diffs_runs ON link_diffs(from_run, to_run)",
 )
 
+# v2.H. Wikitext of pages enrichment has already decompressed.
+#
+# Keyed on `(dump_run, page_id, lang)` and never on `ms_offset`. Offset X in one
+# run's archive is a different block from offset X in another's, so an
+# offset-keyed cache would serve one revision's wikitext for a link recorded
+# against another — the exact error `check_dump_runs_agree` exists to prevent,
+# except silent. The dump run is part of the identity, not metadata about it.
+#
+# This is derived, disposable data: every row can be regenerated from the
+# archive. `content_bytes` is stored so eviction can bound the table without
+# re-measuring, and `last_used` makes that eviction LRU.
+MIGRATION_6: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE page_cache (
+        page_id       INTEGER NOT NULL,
+        lang          TEXT    NOT NULL DEFAULT 'en',
+        dump_run      TEXT    NOT NULL,
+        title         TEXT    NOT NULL,
+        wikitext      TEXT    NOT NULL,
+        content_bytes INTEGER NOT NULL,
+        cached_at     TEXT    NOT NULL,
+        last_used     TEXT    NOT NULL,
+        PRIMARY KEY (page_id, lang, dump_run)
+    )
+    """,
+    "CREATE INDEX idx_page_cache_lru ON page_cache(last_used)",
+)
+
 MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_1,
     MIGRATION_2,
     MIGRATION_3,
     MIGRATION_4,
     MIGRATION_5,
+    MIGRATION_6,
 )
 
 LATEST_VERSION: Final = len(MIGRATIONS)

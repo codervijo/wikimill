@@ -18,6 +18,7 @@ EXPECTED_TABLES = {
     "exports",
     "external_links",
     "link_diffs",
+    "page_cache",
     "robots_cache",
     "url_checks",
     "url_classifications",

@@ -166,6 +166,11 @@ DEFAULT_RECHECK_SECS: Final = 30 * _DAY
 # Consecutive transient failures against one host before it is cooled.
 CIRCUIT_THRESHOLD: Final = 5
 
+# Byte budget for the enrichment page cache. 256 MB holds roughly 30,000
+# articles of average size — far beyond what the cheapest-first pipeline sends
+# to enrichment, and small enough to be unremarkable next to the dumps.
+ENRICH_CACHE_MAX_BYTES: Final = 256 * 1024 * 1024
+
 # Domain states that make a link worth enriching regardless of its URL state.
 #
 # Domain-level discovery can outpace URL-level classification: a domain is

@@ -442,12 +442,21 @@ def enrich(
         bool,
         typer.Option("--dry-run", help="Report pages and blocks that would be read."),
     ] = False,
+    no_cache: Annotated[
+        bool,
+        typer.Option(
+            "--no-cache",
+            help="Ignore the stored page cache and read every block from the "
+                 "archive. Use to re-derive context from the dump itself.",
+        ),
+    ] = False,
 ) -> None:
     """Back-fill section, anchor text, and citation context for interesting links only."""
     cfg = load_config()
     with RunLog(RunKind.ENRICH, cfg.logs_dir) as log:
         gate(cfg, log)
-        enrich_stage.run(cfg, log, states=state, limit=limit, dry_run=dry_run)
+        enrich_stage.run(cfg, log, states=state, limit=limit, dry_run=dry_run,
+                         no_cache=no_cache)
 
 
 @app.command()

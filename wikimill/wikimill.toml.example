@@ -57,6 +57,11 @@
 
 # Which states are worth paying to extract Wikipedia context for.
 [enrich]
+# Wikitext of pages already read is kept so an extraction-rule change can be
+# re-applied with no archive, no seek and no decompression (v2.H). Disposable —
+# deleting it costs time, never information. A non-positive budget is unbounded.
+# cache_enabled = true
+# cache_max_bytes = 268435456
 # url_trigger_states = ["dns_failure", "for_sale", "hard_404", "parked", "soft_404", "tls_failure", "unregistered"]
 # domain_trigger_states = ["expiring", "for_sale", "parked", "unregistered"]
 

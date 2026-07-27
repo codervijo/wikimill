@@ -88,6 +88,10 @@ class Enrich:
     url_trigger_states: list[str] = field(
         default_factory=lambda: sorted(str(s) for s in constants.ENRICH_TRIGGER_STATES)
     )
+    # Page cache (v2.H). Disposable derived data; a non-positive budget means
+    # unbounded, which is a fair choice on a machine with disk to spare.
+    cache_enabled: bool = True
+    cache_max_bytes: int = constants.ENRICH_CACHE_MAX_BYTES
     domain_trigger_states: list[str] = field(
         default_factory=lambda: sorted(constants.DOMAIN_ENRICH_TRIGGER_STATES)
     )
