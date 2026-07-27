@@ -38,12 +38,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
-from . import constants, score
-from .classify import signals
-from .classify import state as classify_state
-from .crawl import politeness
-from .domain import rules as domain_rules
-from .domain import runner as domain_runner
+from . import constants, markers, score
 from .errors import ConfigError
 
 POLICY_FILENAME = "wikimill.toml"
@@ -100,13 +95,13 @@ class Enrich:
 @dataclass
 class Check:
     interesting_url_states: list[str] = field(
-        default_factory=lambda: [str(s) for s in domain_runner.INTERESTING_URL_STATES]
+        default_factory=lambda: [str(s) for s in constants.INTERESTING_URL_STATES]
     )
     recheck_days: dict[str, int] = field(
-        default_factory=lambda: {str(k): v for k, v in domain_runner.RECHECK_DAYS.items()}
+        default_factory=lambda: {str(k): v for k, v in constants.DOMAIN_RECHECK_DAYS.items()}
     )
-    expiry_watch_days: int = domain_rules.EXPIRY_WATCH_DAYS
-    rdap_concurrency_per_registry: int = domain_runner.RDAP_CONCURRENCY_PER_REGISTRY
+    expiry_watch_days: int = constants.EXPIRY_WATCH_DAYS
+    rdap_concurrency_per_registry: int = constants.RDAP_CONCURRENCY_PER_REGISTRY
 
 
 @dataclass
@@ -114,9 +109,9 @@ class Classify:
     recheck_seconds: dict[str, int] = field(
         default_factory=lambda: {str(k): v for k, v in constants.RECHECK_INTERVALS.items()}
     )
-    hard_404_confirmations: int = classify_state.HARD_404_CONFIRMATIONS
-    default_recheck_seconds: int = classify_state.DEFAULT_RECHECK_SECS
-    thin_body_bytes: int = signals.THIN_BODY_BYTES
+    hard_404_confirmations: int = constants.HARD_404_CONFIRMATIONS
+    default_recheck_seconds: int = constants.DEFAULT_RECHECK_SECS
+    thin_body_bytes: int = markers.THIN_BODY_BYTES
 
 
 @dataclass
@@ -126,20 +121,20 @@ class Markers:
     without a code change."""
 
     parking_providers: list[str] = field(
-        default_factory=lambda: list(signals.PARKING_PROVIDERS)
+        default_factory=lambda: list(markers.PARKING_PROVIDERS)
     )
     parking_phrases: list[str] = field(
-        default_factory=lambda: list(signals.PARKING_PHRASES)
+        default_factory=lambda: list(markers.PARKING_PHRASES)
     )
-    parking_weak: list[str] = field(default_factory=lambda: list(signals.PARKING_WEAK))
+    parking_weak: list[str] = field(default_factory=lambda: list(markers.PARKING_WEAK))
     for_sale_phrases: list[str] = field(
-        default_factory=lambda: list(signals.FOR_SALE_PHRASES)
+        default_factory=lambda: list(markers.FOR_SALE_PHRASES)
     )
     soft_404_phrases: list[str] = field(
-        default_factory=lambda: list(signals.SOFT_404_PHRASES)
+        default_factory=lambda: list(markers.SOFT_404_PHRASES)
     )
     soft_404_title_markers: list[str] = field(
-        default_factory=lambda: list(signals.SOFT_404_TITLE_MARKERS)
+        default_factory=lambda: list(markers.SOFT_404_TITLE_MARKERS)
     )
 
 
@@ -150,7 +145,7 @@ class Crawl:
     max_retries: int = constants.MAX_RETRIES
     retry_base_seconds: float = constants.RETRY_BASE_SECS
     retry_cap_seconds: float = constants.RETRY_CAP_SECS
-    circuit_breaker_threshold: int = politeness.CIRCUIT_THRESHOLD
+    circuit_breaker_threshold: int = constants.CIRCUIT_THRESHOLD
 
 
 @dataclass

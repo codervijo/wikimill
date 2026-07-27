@@ -119,6 +119,46 @@ RECHECK_INTERVALS: Final[dict[str, int]] = {
     UrlState.BLOCKED_BY_ROBOTS: 180 * _DAY,
 }
 
+# --------------------------------------------------------------------------
+# Domain-check defaults. These live here rather than in `domain/runner.py`
+# because `policy.py` reads them as its built-in defaults, and the runner now
+# imports policy — constants is the leaf both can depend on.
+# --------------------------------------------------------------------------
+
+# URL classifications that make a domain worth an authoritative check.
+INTERESTING_URL_STATES: Final[tuple[str, ...]] = (
+    UrlState.DNS_FAILURE,
+    UrlState.TLS_FAILURE,
+    UrlState.HARD_404,
+    UrlState.SOFT_404,
+    UrlState.PARKED,
+    UrlState.FOR_SALE,
+)
+
+DOMAIN_RECHECK_DAYS: Final[dict[str, int]] = {
+    DomainState.UNREGISTERED: 3,
+    DomainState.EXPIRING: 1,
+    DomainState.FOR_SALE: 7,
+    DomainState.PARKED: 7,
+    DomainState.ACTIVE: 90,
+    DomainState.NO_RDAP_FOR_TLD: 30,
+    DomainState.UNKNOWN: 7,
+}
+
+# Concurrent RDAP requests permitted to any ONE registry.
+RDAP_CONCURRENCY_PER_REGISTRY: Final = 4
+
+# How near an expiry date must be to warrant watching closely. It does not
+# decide state — see domain/rules.py.
+EXPIRY_WATCH_DAYS: Final = 60
+
+# Consecutive identical `hard_404` verdicts before a URL stops being checked.
+HARD_404_CONFIRMATIONS: Final = 3
+DEFAULT_RECHECK_SECS: Final = 30 * _DAY
+
+# Consecutive transient failures against one host before it is cooled.
+CIRCUIT_THRESHOLD: Final = 5
+
 # Domain states that make a link worth enriching regardless of its URL state.
 #
 # Domain-level discovery can outpace URL-level classification: a domain is

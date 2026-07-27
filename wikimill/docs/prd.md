@@ -280,8 +280,8 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 |---|---|---|
 | v2.A | ✅ done | Plan the tier: `wikimill.toml` schema, precedence, and the policy-vs-code line |
 | v2.B | ✅ done | **`wikimill.toml` policy config**: loader, validation with typed errors, `config show` / `config validate`, `.example` file |
-| v2.C | ⏳ planned | **Move the policy constants into it**: export candidate states, `--min-pages` floor, scoring weights (§ `score.py`), enrichment trigger sets, recheck cadences, expiry watch window, per-host delay and concurrency |
-| v2.D | ⏳ planned | **Operator-editable marker lists**: parking/for-sale/soft-404 signatures, tracking-parameter list, Wikimedia + resolver exclusion lists — with a `CLASSIFIER_VERSION` bump on change so verdicts stay auditable |
+| v2.C | ✅ done | **Move the policy constants into it**: export candidate states, `--min-pages` floor, scoring weights (§ `score.py`), enrichment trigger sets, recheck cadences, expiry watch window, per-host delay and concurrency |
+| v2.D | ✅ done | **Operator-editable marker lists**: parking/for-sale/soft-404 signatures, tracking-parameter list, Wikimedia + resolver exclusion lists — with a `CLASSIFIER_VERSION` bump on change so verdicts stay auditable |
 | v2.E | ⏳ planned | Recheck scheduler (§12): `next_check_at`, tiered cadences, `--due` selection, terminal-record protection |
 | v2.F | ⏳ planned | `exturlusage` verification pass before export ("does enwiki still link here?") |
 | v2.G | ⏳ planned | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
@@ -301,6 +301,19 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 **An unknown key is an error, never silently ignored.** A typo that is quietly dropped is worse than a crash: the operator believes they changed a threshold and the tool carries on with the old one. `min_page` instead of `min_pages` fails with the valid key list.
 
 **Version stamping is automatic.** v2.D's requirement was "a `CLASSIFIER_VERSION` bump on change so verdicts stay auditable" — relying on someone remembering to bump a constant. Instead `effective_classifier_version` folds in a fingerprint of every value that affects a verdict (`1+b3bd73bee788`), so editing a weight or a marker list makes stored verdicts distinguishable from ones judged under the old rules, automatically. Non-classifying changes — crawl pacing, concurrency — deliberately do *not* shift it, or unrelated runs would look incomparable.
+
+**v2.C / v2.D** — ✅ shipped 2026-07-26, together. v2.B built the loader; these two make it *load-bearing*. Every constant listed above now reaches its consumer as a `policy` argument — scoring weights, marker vocabularies, thin-body threshold, enrichment triggers, recheck cadences, the expiry watch window, the RDAP gate. v2.D collapsed into v2.C because the marker lists were already `[markers]` sections in v2.B's schema; what was missing was the same thing v2.C was missing, namely a consumer that reads them.
+
+**Measured end-to-end on the real corpus**, not asserted: a two-line `wikimill.toml` (`[export] min_pages = 5`) took the export from **2,967 candidates to 43** across all 135,591 domains, with no rebuild and no code change.
+
+**The tests that matter here assert outcomes, not fields.** `test_policy.py` proves the file parses; that is the weaker claim, and a config which loads perfectly and is then ignored by every consumer would pass all of it. `test_policy_effect.py` (16 tests) writes a real toml, runs the real consumer, and asserts the *result* differs — a weight edit that **reverses which of two domains ranks higher**, a new parking phrase that flips a verdict to `parked`, a removed one that flips it back, a narrowed trigger set that halves `count_pending`, and a CLI flag that still beats the file.
+
+**Two defects this tier surfaced, both fixed:**
+
+* **The fingerprint never reached the database.** `effective_classifier_version` was computed, printed, and then discarded — `record()` stored the bare `CLASSIFIER_VERSION` integer. Since `url_classifications` is unique on `(check_id, classifier_version)`, a re-classify under an edited marker list would have been silently swallowed as a duplicate, and the auditability this section claims would have been decorative. Verdict rows now carry the effective version, and the reclassify staleness check became **equality rather than `>=`**: two different marker lists at the same `CLASSIFIER_VERSION` are different rules, and neither is "newer".
+* **A circular import.** `policy.py` read its defaults from the modules that consume it. The marker vocabularies moved to a leaf `markers.py` and the domain-check defaults to `constants.py` — data one hop below both, rather than an import hidden inside a function.
+
+**Not made tunable, deliberately** — the safety invariants of §18 remain code: per-domain concurrency of 1, redirect and body-size caps, the two-resolver rule for `unregistered`, robots.txt obedience. `test_policy.py::test_safety_invariants_are_not_configurable` fails if any of them acquires a key.
 
 **v2.I** — ✅ shipped 2026-07-26, out of tier order. Stage 5 was the last sequential stage, at 1.36 domains/sec, making a 112,349-domain tail sweep a 23-hour job. Now **9.46/sec measured on 300 real domains — 7× faster**, bringing the sweep to ~3.3 hours.
 

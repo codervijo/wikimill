@@ -15,16 +15,15 @@ from __future__ import annotations
 
 import sqlite3
 
-from ..constants import RECHECK_INTERVALS, UrlState
+from ..constants import (
+    DEFAULT_RECHECK_SECS,
+    HARD_404_CONFIRMATIONS,
+    RECHECK_INTERVALS,
+    UrlState,
+)
 from ..logging import utcnow
+from ..policy import Policy
 
-# Consecutive identical `hard_404` verdicts before the URL stops being checked.
-# More than one because a single 404 can be a deploy blip; not many more,
-# because the page is almost certainly gone.
-HARD_404_CONFIRMATIONS = 3
-
-# Fallback when a classification has no configured cadence.
-DEFAULT_RECHECK_SECS = 30 * 86_400
 
 # Failure states that feed the per-URL consecutive-failure counter.
 _FAILURE_STATES = frozenset(
@@ -36,7 +35,7 @@ _FAILURE_STATES = frozenset(
 )
 
 
-def recheck_seconds(classification: str, *, repeats: int = 0) -> int:
+def recheck_seconds(classification: str, *, repeats: int = 0, policy=None) -> int:
     """How long until this URL is due again.
 
     `hard_404` doubles with each repeat (capped at 180 days) — a page that has
@@ -44,13 +43,15 @@ def recheck_seconds(classification: str, *, repeats: int = 0) -> int:
     uses its configured cadence unchanged, because the value of a `parked` or
     `for_sale` observation is in its freshness.
     """
-    base = RECHECK_INTERVALS.get(classification, DEFAULT_RECHECK_SECS)
+    cadences = policy.classify.recheck_seconds if policy else RECHECK_INTERVALS
+    fallback = policy.classify.default_recheck_seconds if policy else DEFAULT_RECHECK_SECS
+    base = cadences.get(str(classification), fallback)
     if classification == UrlState.HARD_404 and repeats > 0:
         return min(base * (2**repeats), 180 * 86_400)
     return base
 
 
-def is_terminal(classification: str, consecutive: int) -> bool:
+def is_terminal(classification: str, consecutive: int, policy=None) -> bool:
     """Only a repeatedly-confirmed `hard_404` stops being checked.
 
     Deliberately narrow. Anything the operator might act on stays in rotation —
@@ -58,7 +59,8 @@ def is_terminal(classification: str, consecutive: int) -> bool:
     """
     return (
         classification == UrlState.HARD_404
-        and consecutive >= HARD_404_CONFIRMATIONS
+        and consecutive >= (policy.classify.hard_404_confirmations if policy
+                            else HARD_404_CONFIRMATIONS)
     )
 
 
@@ -85,11 +87,19 @@ def record(
     check_id: int,
     url_hash: str,
     verdict,
+    policy=None,
 ) -> None:
     """Append the verdict and advance the URL. Never updates `url_checks`."""
     import json
 
     now = utcnow()
+    # The *effective* version, not the bare constant: a verdict produced under a
+    # tuned marker list is not the same verdict the shipped one would produce,
+    # and `url_classifications` is unique on (check_id, classifier_version) —
+    # so stamping the fingerprint is what lets a re-classify under new rules
+    # append alongside the old call instead of silently being ignored as a
+    # duplicate. Without this the whole fingerprinting scheme is decorative.
+    version = (policy or Policy()).effective_classifier_version
     conn.execute(
         "INSERT OR IGNORE INTO url_classifications "
         "(check_id, url_hash, classified_at, classifier_version, classification, "
@@ -98,7 +108,7 @@ def record(
             check_id,
             url_hash,
             now,
-            verdict.version,
+            version,
             verdict.classification,
             json.dumps(verdict.reasons),
             verdict.confidence,
@@ -106,8 +116,8 @@ def record(
     )
 
     repeats = consecutive_count(conn, url_hash, verdict.classification)
-    terminal = is_terminal(verdict.classification, repeats)
-    seconds = recheck_seconds(verdict.classification, repeats=max(0, repeats - 1))
+    terminal = is_terminal(verdict.classification, repeats, policy)
+    seconds = recheck_seconds(verdict.classification, repeats=max(0, repeats - 1), policy=policy)
     failed = verdict.classification in _FAILURE_STATES
 
     conn.execute(

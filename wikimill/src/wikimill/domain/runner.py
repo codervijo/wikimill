@@ -28,42 +28,26 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from ..config import Config
-from ..constants import DomainState, RunKind, UrlState
+from ..constants import (
+    DOMAIN_RECHECK_DAYS as RECHECK_DAYS,
+    INTERESTING_URL_STATES,
+    RDAP_CONCURRENCY_PER_REGISTRY,
+    DomainState,
+    RunKind,
+    UrlState,
+)
 from ..logging import RunLog, utcnow
+from ..policy import Policy
+from ..policy import load as load_policy
 from ..storage import open_db
 from . import dns as dns_mod
 from . import rdap as rdap_mod
 from .rdap import expires_within
 from .rules import EXPIRY_WATCH_DAYS, classify
 
-# URL classifications that make a domain worth an authoritative check.
-INTERESTING_URL_STATES = (
-    UrlState.DNS_FAILURE,
-    UrlState.TLS_FAILURE,
-    UrlState.HARD_404,
-    UrlState.SOFT_404,
-    UrlState.PARKED,
-    UrlState.FOR_SALE,
-)
-
-# Concurrent RDAP requests permitted to any ONE registry. Deliberately small:
-# registries publish rate limits and a sweep can be 100k domains. DNS is not
-# bounded this way — public resolvers are built for the volume.
-RDAP_CONCURRENCY_PER_REGISTRY = 4
-
 # Results per commit, so a long sweep survives a crash. Same reasoning as the
 # crawler: re-running costs real requests to registries.
 CHECKPOINT_EVERY = 50
-
-RECHECK_DAYS = {
-    DomainState.UNREGISTERED: 3,
-    DomainState.EXPIRING: 1,
-    DomainState.FOR_SALE: 7,
-    DomainState.PARKED: 7,
-    DomainState.ACTIVE: 90,
-    DomainState.NO_RDAP_FOR_TLD: 30,
-    DomainState.UNKNOWN: 7,
-}
 
 
 @dataclass
@@ -87,6 +71,7 @@ def select_domains(
     limit: int | None,
     states: list[str] | None,
     force: bool,
+    policy=None,
 ) -> list[_Target]:
     """Pick domains worth an authoritative check."""
     params: list = []
@@ -98,7 +83,9 @@ def select_domains(
         )
         params.extend(states)
     else:
-        placeholders = ",".join("?" * len(INTERESTING_URL_STATES))
+        interesting = tuple(policy.check.interesting_url_states) if policy \
+                      else INTERESTING_URL_STATES
+        placeholders = ",".join("?" * len(interesting))
         where.append(
             f"""(
                 d.last_checked IS NULL
@@ -108,7 +95,7 @@ def select_domains(
                 )
             )"""
         )
-        params.extend(INTERESTING_URL_STATES)
+        params.extend(interesting)
 
     if not force:
         where.append("(d.next_check_at IS NULL OR d.next_check_at <= ?)")
@@ -140,6 +127,7 @@ def _record(
     rdap_result,
     verdict,
     stats: CheckStats,
+    policy=None,
 ) -> None:
     now = utcnow()
     conn.execute(
@@ -172,19 +160,22 @@ def _record(
             check_id,
             target.domain_id,
             now,
-            verdict.version,
+            # See classify/state.py — the fingerprint must reach the row.
+            (policy or Policy()).effective_classifier_version,
             verdict.state,
             json.dumps(verdict.reasons),
             verdict.confidence,
         ),
     )
-    days = RECHECK_DAYS.get(verdict.state, 30)
+    cadence = policy.check.recheck_days if policy else RECHECK_DAYS
+    days = cadence.get(str(verdict.state), 30)
     # An approaching expiry no longer changes the *state* (it predicts almost
     # nothing — most domains simply renew), but it is worth watching closely, so
     # it shortens the recheck window. If the registration ever does lapse, the
     # domain enters redemption and the next check catches it.
+    watch = policy.check.expiry_watch_days if policy else EXPIRY_WATCH_DAYS
     if verdict.state == DomainState.ACTIVE and expires_within(
-        rdap_result.expiry, EXPIRY_WATCH_DAYS
+        rdap_result.expiry, watch
     ):
         days = min(days, 3)
     conn.execute(
@@ -239,9 +230,10 @@ def run(
     from ..crawl.fetcher import build_client
 
     stats = CheckStats()
+    policy = load_policy(cfg.root)
     wanted = [s.strip() for s in states.split(",")] if states else None
     resolvers = cfg.dns_resolvers
-    workers = max(1, concurrency or cfg.concurrency)
+    workers = max(1, concurrency or policy.crawl.concurrency)
 
     if len(resolvers) < 2:
         log.fail(
@@ -255,7 +247,8 @@ def run(
         return stats
 
     with open_db(cfg.db_path) as conn:
-        targets = select_domains(conn, limit=limit, states=wanted, force=force)
+        targets = select_domains(conn, limit=limit, states=wanted, force=force,
+                                 policy=policy)
         stats.considered = len(targets)
         if not targets:
             log.warn("queue", "no domains due — nothing to check")
@@ -273,15 +266,16 @@ def run(
                 log.ok("rdap", f"IANA bootstrap: {len(bootstrap):,} TLDs")
             log.ok(
                 "concurrency",
-                f"{workers} workers · max {RDAP_CONCURRENCY_PER_REGISTRY} "
+                f"{workers} workers · max {policy.check.rdap_concurrency_per_registry} "
                 "concurrent RDAP requests per registry",
             )
 
             # One semaphore per registry endpoint, created on demand. Guards the
             # registry, not the worker, so `.com` cannot be hammered while the
             # long tail of 1,500 other suffixes proceeds freely.
+            rdap_gate = policy.check.rdap_concurrency_per_registry
             gates: dict[str, threading.Semaphore] = defaultdict(
-                lambda: threading.Semaphore(RDAP_CONCURRENCY_PER_REGISTRY)
+                lambda: threading.Semaphore(rdap_gate)
             )
             gates_lock = threading.Lock()
             out: queue.Queue = queue.Queue()
@@ -329,8 +323,9 @@ def run(
                         dns_result,
                         rdap_result,
                         url_states=url_state_tally(conn, target.domain_id),
+                        policy=policy,
                     )
-                    _record(conn, target, dns_result, rdap_result, verdict, stats)
+                    _record(conn, target, dns_result, rdap_result, verdict, stats, policy)
                     if done % CHECKPOINT_EVERY == 0:
                         conn.execute("COMMIT")
                         conn.execute("BEGIN")

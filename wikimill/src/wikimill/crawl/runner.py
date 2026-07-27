@@ -33,6 +33,7 @@ from ..config import Config
 from ..constants import RunKind, UrlState
 from ..errors import CrawlError
 from ..logging import RunLog, utcnow
+from ..policy import load as load_policy
 from ..storage import open_db
 from . import robots as robots_mod
 from .fetcher import FetchResult, build_client, fetch
@@ -101,6 +102,7 @@ def _record(
     result: FetchResult | None,
     robots_decision: str,
     stats: CrawlStats,
+    policy=None,
 ) -> None:
     """Append one `url_checks` row and advance the URL. Single-writer only."""
     now = utcnow()
@@ -117,10 +119,12 @@ def _record(
             (now, task.url_hash),
         )
         verdict = classify(
-            Observation(url=task.url, robots_decision=robots_decision, fetched=False)
+            Observation(url=task.url, robots_decision=robots_decision, fetched=False),
+            policy,
         )
         classify_state.record(
-            conn, check_id=check_id, url_hash=task.url_hash, verdict=verdict
+            conn, check_id=check_id, url_hash=task.url_hash, verdict=verdict,
+            policy=policy,
         )
         stats.blocked_by_robots += 1
         return
@@ -162,9 +166,9 @@ def _record(
     observation = replace(
         observation, cross_domain_redirect=_crossed_domain(task.url, result.final_url)
     )
-    verdict = classify(observation)
+    verdict = classify(observation, policy)
     classify_state.record(
-        conn, check_id=check_id, url_hash=task.url_hash, verdict=verdict
+        conn, check_id=check_id, url_hash=task.url_hash, verdict=verdict, policy=policy
     )
     stats.verdicts[verdict.classification] += 1
     if result.ok:
@@ -300,7 +304,8 @@ def run(
     from concurrent.futures import ThreadPoolExecutor
 
     stats = CrawlStats()
-    workers = max(1, concurrency or cfg.concurrency)
+    policy = load_policy(cfg.root)
+    workers = max(1, concurrency or policy.crawl.concurrency)
 
     with open_db(cfg.db_path) as conn:
         tasks = select_due(conn, limit, force)
@@ -321,7 +326,7 @@ def run(
         out: queue.Queue = queue.Queue()
         stop = threading.Event()
         robots_lock = threading.Lock()
-        politeness = Politeness(default_delay=cfg.crawl_delay)
+        politeness = Politeness(default_delay=policy.crawl.delay_seconds)
         user_agent = cfg.user_agent
         # Loaded here, on the main thread, and handed to workers as a plain
         # dict. Workers must never touch SQLite (see _worker).
@@ -372,7 +377,7 @@ def run(
                         log.progress(f"retry in {delay:.1f}s — {task.url[:58]}")
                         continue
                     task, result, reason = item
-                    _record(conn, task, result, reason, stats)
+                    _record(conn, task, result, reason, stats, policy)
                     done += 1
                     if done % CHECKPOINT_EVERY == 0:
                         robots_mod.persist_store(conn, robots_store)

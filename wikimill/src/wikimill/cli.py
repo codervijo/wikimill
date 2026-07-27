@@ -440,8 +440,10 @@ def export_cmd(
         str | None, typer.Option("--state", help="Comma-separated states to export.")
     ] = None,
     min_pages: Annotated[
-        int, typer.Option("--min-pages", help="Minimum citing Wikipedia pages.")
-    ] = 1,
+        int | None,
+        typer.Option("--min-pages", help="Minimum citing Wikipedia pages. "
+                                         "Defaults to [export].min_pages."),
+    ] = None,
     fmt: Annotated[
         str, typer.Option("--format", help="csv or jsonl.")
     ] = "csv",
@@ -453,23 +455,27 @@ def export_cmd(
         raise ConfigError(
             f"Unknown --format {fmt!r}.", remediation="Use --format csv or --format jsonl."
         )
+    pol = policy_mod.load(cfg.root)
+    # CLI flag > config > built-in default (policy.py).
     states = (
         [s.strip() for s in state.split(",") if s.strip()]
         if state
-        else list(export_mod.DEFAULT_STATES)
+        else [str(x) for x in pol.export.candidate_states]
     )
+    floor = min_pages if min_pages is not None else pol.export.min_pages
     with RunLog(RunKind.EXPORT, cfg.logs_dir) as log:
         gate(cfg, log)
         with open_db(cfg.db_path) as conn:
             conn.execute("BEGIN")
-            scored = score_mod.rescore_all(conn)
+            scored = score_mod.rescore_all(conn, pol)
             conn.execute("COMMIT")
-            log.ok("scored", f"{scored:,} domain(s) · scorer v{score_mod.SCORER_VERSION}")
+            log.ok("scored", f"{scored:,} domain(s) · scorer v{score_mod.SCORER_VERSION} "
+                             f"· policy {pol.effective_classifier_version}")
 
             path = Path(out) if out else cfg.outputs_dir / f"candidates.{fmt}"
             conn.execute("BEGIN")
             stats = export_mod.write(
-                conn, path, states=states, min_pages=min_pages, fmt=fmt
+                conn, path, states=states, min_pages=floor, fmt=fmt
             )
             conn.execute("COMMIT")
 
@@ -481,7 +487,7 @@ def export_cmd(
             log.warn(
                 "exported",
                 f"0 candidates matched — nothing is in {', '.join(states)} "
-                f"with >= {min_pages} citing page(s)",
+                f"with >= {floor} citing page(s)",
             )
 
 

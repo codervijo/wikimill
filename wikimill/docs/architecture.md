@@ -19,6 +19,8 @@ wikimill/
 │   ├── cli.py                 # Typer app — the 9 commands
 │   ├── config.py              # env loading, precedence, redaction
 │   ├── constants.py           # canonical enums/versions/defaults
+│   ├── markers.py             # v2.C: marker word lists — a leaf, see below
+│   ├── policy.py              # v2.B/C: wikimill.toml — the tuning surface
 │   ├── errors.py              # typed errors + exit-code contract
 │   ├── logging.py             # ✓ ✗ ↷ markers + JSONL run log
 │   ├── preflight.py           # the mandatory gate
@@ -41,7 +43,7 @@ wikimill/
 │   │   ├── fetcher.py         #   one URL -> one url_checks row of evidence
 │   │   └── runner.py          #   domain-partitioned workers, single writer
 │   ├── classify/              # v1.F: stage 4, a pure function over evidence
-│   │   ├── signals.py         #   marker vocabularies (parking, sale, soft-404)
+│   │   ├── signals.py         #   marker matching (vocabularies in markers.py)
 │   │   ├── rules.py           #   Observation -> Verdict
 │   │   ├── state.py           #   state machine, cadences, terminality
 │   │   └── runner.py          #   offline re-classification (no network)
@@ -58,7 +60,7 @@ wikimill/
 │   ├── score.py               # v1.I: explainable ranking (never exclusion)
 │   ├── inspect.py             # v1.I: everything known about one thing
 │   └── export.py              # v1.I: deterministic, attributable candidate file
-├── tests/                     # 441 tests, hermetic (no network, no Docker)
+├── tests/                     # 482 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -259,6 +261,22 @@ The launcher forwards every other host `WIKIMILL_*` variable with `-e` *after* `
 
 **Secrets.** None are needed at v1, but the whole path is built: gitignored `wikimill.env`, committed `.example` with no real values, and redaction of any variable matching `*_KEY|*_TOKEN|*_SECRET|*_PASSWORD` across `preflight`, `--json`, logs, and `crawl_runs.args`. Retrofitting this around a key that has already been committed once is far more expensive.
 
+### 9a. Policy — `wikimill.toml` (v2.B/v2.C)
+
+The env layer above is credentials-and-environment. **Policy** — what the tool looks for and how it ranks it — lives in a separate `wikimill.toml`, because a secret does not belong in a checked-in config file. Full precedence: **CLI flag > environment > `wikimill.toml` > built-in default.**
+
+`policy.py` holds seven typed sections (`scoring`, `export`, `enrich`, `check`, `classify`, `markers`, `crawl`) whose dataclass defaults *are* the shipped policy — so a fresh checkout with no toml at all behaves identically to one with the `.example` copied verbatim. An unknown key is a `ConfigError` naming the valid keys, never a silent no-op.
+
+**How policy reaches the code.** Runners call `load(cfg.root)` once and pass the result down as an argument; the pure functions (`score_domain`, `classify`, `recheck_seconds`, the signal matchers) take `policy=None` and fall back to their module constants. Passing rather than importing keeps them pure — same inputs, same output — and lets a test hand one in without touching the filesystem.
+
+**Why `markers.py` is a top-level leaf.** The marker vocabularies are read by two places: `classify/signals.py` matches with them, and `policy.py` uses them as its built-in defaults. They can live in neither. Importing `wikimill.classify` runs its `__init__`, which reaches `classify/runner.py`, which loads policy — a cycle. Putting the *data* one hop below both consumers breaks it without hiding an import inside a function. The domain-check defaults (`INTERESTING_URL_STATES`, `DOMAIN_RECHECK_DAYS`, `EXPIRY_WATCH_DAYS`, `RDAP_CONCURRENCY_PER_REGISTRY`, `HARD_404_CONFIRMATIONS`, `CIRCUIT_THRESHOLD`) moved into `constants.py` for the same reason.
+
+**Automatic version stamping.** `effective_classifier_version` is `CLASSIFIER_VERSION` plus a 12-char digest of every section that affects a verdict — `1+4458ff725a4c`. Editing a weight or a marker list shifts it without anyone remembering to bump a constant; editing `[export] min_pages` or crawl pacing deliberately does not, or unrelated runs would look incomparable.
+
+That string is **stored on every verdict row**, not just printed. It has to be: `url_classifications` is unique on `(check_id, classifier_version)`, so a re-classify under edited rules would otherwise be swallowed as a duplicate of the original call. For the same reason the reclassify staleness check is **equality, not `>=`** — two marker lists at the same `CLASSIFIER_VERSION` are different rules, and neither is newer than the other.
+
+**Not configurable, by design.** The §18 safety invariants stay code: per-domain concurrency of 1, redirect/body/evidence caps, the two-resolver rule for `unregistered`, robots.txt obedience, and the export licence header. Configurable politeness is politeness someone eventually turns off. A test asserts none of them has acquired a key.
+
 ## 10. Preflight
 
 A registry of small check functions, each returning a `CheckResult(marker, step, detail, remediation)`. Runs before every state-touching command and aborts on ✗ before any work, network request, or dump read.
@@ -307,7 +325,7 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 13. Testing
 
-441 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+482 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness
@@ -336,8 +354,10 @@ Logged as they arise, per house convention.
   Deferred because wikimill sends no credentials and reads nothing into a trust
   boundary, so the residual exposure is a request being made rather than data
   disclosed — but it is a real gap, not a solved problem.
-- **Parking-signature drift (v1.F).** `classify/signals.py` is heuristics over
+- **Parking-signature drift (v1.F).** `markers.py` is heuristics over
   attacker-influenceable text, and parking providers change their templates.
-  Because verdicts are versioned and stored apart from observations, tightening
-  the lists is a `CLASSIFIER_VERSION` bump plus `crawl --reclassify` — no
-  refetching — but the lists still need periodic review against real misses.
+  Since v2.C the lists are `[markers]` in `wikimill.toml`, so tightening them is
+  an operator edit plus `crawl --reclassify` — no code change, no rebuild, no
+  refetching, and the version stamp shifts on its own. What remains tracked is
+  that nothing *prompts* that review: the lists still need checking against real
+  misses, and the tool cannot yet tell the operator when one has drifted.

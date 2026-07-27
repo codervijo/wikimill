@@ -13,11 +13,8 @@ import random
 import time
 from dataclasses import dataclass, field
 
-from ..constants import MAX_RETRIES, RETRY_BASE_SECS, RETRY_CAP_SECS
+from ..constants import CIRCUIT_THRESHOLD, MAX_RETRIES, RETRY_BASE_SECS, RETRY_CAP_SECS
 
-# Consecutive transient failures against one host before it is cooled for the
-# rest of the run. One sick server must never stall a whole crawl.
-CIRCUIT_THRESHOLD = 5
 
 
 def backoff_delay(attempt: int, *, base: float = RETRY_BASE_SECS,

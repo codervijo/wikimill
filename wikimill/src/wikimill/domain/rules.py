@@ -20,14 +20,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..constants import CLASSIFIER_VERSION, DomainState
+from ..constants import CLASSIFIER_VERSION, EXPIRY_WATCH_DAYS, DomainState
 from .dns import DnsResult, DnsStatus
 from .rdap import EXPIRING_STATUSES, RdapResult, RdapStatus
 
-# How near an expiry date must be to warrant *watching closely*. It no longer
-# decides state — see the note in `classify` — but it does shorten the recheck
-# window so an approaching renewal date is not missed if it lapses.
-EXPIRY_WATCH_DAYS = 60
 
 
 @dataclass
@@ -43,6 +39,7 @@ def classify(
     rdap: RdapResult,
     *,
     url_states: dict[str, int] | None = None,
+    policy=None,
 ) -> DomainVerdict:
     """Judge one domain from its DNS and RDAP evidence.
 

@@ -23,6 +23,7 @@ from pathlib import Path
 from ..config import Config
 from ..constants import EnrichStatus, RunKind
 from ..logging import RunLog, utcnow
+from ..policy import load as load_policy
 from ..storage import open_db
 from . import seek as seek_mod
 from . import select as select_mod
@@ -103,12 +104,13 @@ def run(
 ) -> EnrichStats:
     """Execute the enrichment stage."""
     stats = EnrichStats()
-    trigger_states = select_mod.parse_states(states)
+    policy = load_policy(cfg.root)
+    trigger_states = select_mod.parse_states(states, policy)
 
     with open_db(cfg.db_path) as conn:
         # --- the fast path -------------------------------------------------
         # One indexed count, before anything touches a dump file.
-        stats.pending = select_mod.count_pending(conn, trigger_states)
+        stats.pending = select_mod.count_pending(conn, trigger_states, policy=policy)
         log.ok("trigger states", ", ".join(trigger_states))
         if stats.pending == 0:
             log.warn(
@@ -118,7 +120,7 @@ def run(
             )
             return stats
 
-        candidates = select_mod.select(conn, trigger_states, limit=limit)
+        candidates = select_mod.select(conn, trigger_states, limit=limit, policy=policy)
         stats.candidates = len(candidates)
         blocks = select_mod.group_by_block(candidates)
         log.ok(

@@ -91,28 +91,46 @@ class Score:
         )
 
 
-def score_domain(row: sqlite3.Row, url_states: dict[str, int], kinds: dict[str, int]) -> Score:
-    """Score one domain from its own row plus its URL and link evidence."""
+def score_domain(
+    row: sqlite3.Row,
+    url_states: dict[str, int],
+    kinds: dict[str, int],
+    policy=None,
+) -> Score:
+    """Score one domain from its own row plus its URL and link evidence.
+
+    `policy` supplies the weights. Passed as an argument rather than read from a
+    global so the function stays pure: same inputs, same score, and a test can
+    hand it a policy without touching the filesystem.
+    """
+    w = policy.scoring if policy is not None else None
+    state_points = w.state_points if w else STATE_POINTS
+    death_points = w.url_death_points if w else URL_DEATH_POINTS
+    kind_points = w.kind_points if w else KIND_POINTS
+    per_page = w.citation_points_per_page if w else CITATION_POINTS_PER_PAGE
+    cap = w.citation_points_cap if w else CITATION_POINTS_CAP
+    tagged_points = w.dead_link_tagged_points if w else DEAD_LINK_TAGGED_POINTS
+    penalty = w.private_suffix_penalty if w else PRIVATE_SUFFIX_PENALTY
     score = Score()
 
     state = row["state"] or DomainState.UNKNOWN
-    score.add("acquireability", STATE_POINTS.get(state, 0), f"domain is {state}")
+    score.add("acquireability", state_points.get(str(state), 0), f"domain is {state}")
 
     pages = row["wiki_page_count"] or 0
     if pages:
         score.add(
             "citations",
-            min(pages * CITATION_POINTS_PER_PAGE, CITATION_POINTS_CAP),
+            min(pages * per_page, cap),
             f"cited by {pages} distinct Wikipedia page(s)",
         )
 
-    for url_state, points in URL_DEATH_POINTS.items():
-        count = url_states.get(url_state, 0)
+    for url_state, points in death_points.items():
+        count = url_states.get(str(url_state), 0)
         if count:
             score.add("url evidence", points, f"{count} URL(s) {url_state}")
             break  # strongest signal only — these are not additive
 
-    for kind, points in KIND_POINTS.items():
+    for kind, points in kind_points.items():
         count = kinds.get(kind, 0)
         if count:
             score.add("citation quality", points, f"appears in {kind}")
@@ -121,14 +139,14 @@ def score_domain(row: sqlite3.Row, url_states: dict[str, int], kinds: dict[str, 
     if kinds.get("__dead_link_tagged__"):
         score.add(
             "editor corroboration",
-            DEAD_LINK_TAGGED_POINTS,
+            tagged_points,
             "Wikipedia tagged {{dead link}}",
         )
 
     if row["is_private_suffix"]:
         score.add(
             "private suffix",
-            PRIVATE_SUFFIX_PENALTY,
+            penalty,
             f"under {row['public_suffix']} — may not be independently acquireable",
         )
 
@@ -163,7 +181,7 @@ def evidence_for(conn: sqlite3.Connection, domain_id: int) -> tuple[dict, dict]:
     return url_states, kinds
 
 
-def rescore_all(conn: sqlite3.Connection) -> int:
+def rescore_all(conn: sqlite3.Connection, policy=None) -> int:
     """Recompute every domain's score. Cheap, deterministic, and idempotent."""
     rows = conn.execute(
         "SELECT domain_id, state, wiki_page_count, is_private_suffix, public_suffix "
@@ -171,7 +189,7 @@ def rescore_all(conn: sqlite3.Connection) -> int:
     ).fetchall()
     for row in rows:
         url_states, kinds = evidence_for(conn, row["domain_id"])
-        score = score_domain(row, url_states, kinds)
+        score = score_domain(row, url_states, kinds, policy)
         conn.execute(
             "UPDATE domains SET candidate_score=?, score_explanation=? WHERE domain_id=?",
             (score.total, score.as_json(), row["domain_id"]),

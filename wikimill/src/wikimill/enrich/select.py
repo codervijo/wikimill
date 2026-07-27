@@ -34,7 +34,7 @@ class Candidate:
     url_state: str
 
 
-def parse_states(states: str | None) -> list[str]:
+def parse_states(states: str | None, policy=None) -> list[str]:
     """Resolve the trigger set. Defaults to everything except healthy states.
 
     The default deliberately excludes `live` and same-domain `redirect`: paying
@@ -42,19 +42,23 @@ def parse_states(states: str | None) -> list[str]:
     ordered to avoid.
     """
     if not states:
+        if policy is not None:
+            return sorted(policy.enrich.url_trigger_states)
         return sorted(ENRICH_TRIGGER_STATES)
     return [s.strip() for s in states.split(",") if s.strip()]
 
 
 def count_pending(
-    conn: sqlite3.Connection, states: list[str], dump_run: str | None = None
+    conn: sqlite3.Connection, states: list[str], dump_run: str | None = None,
+    policy=None,
 ) -> int:
     """How many link occurrences are awaiting enrichment. One indexed query.
 
     Called before anything opens a dump file, so the common "nothing is dead"
     case costs a count and nothing else.
     """
-    domain_states = sorted(DOMAIN_ENRICH_TRIGGER_STATES)
+    domain_states = sorted(policy.enrich.domain_trigger_states if policy
+                           else DOMAIN_ENRICH_TRIGGER_STATES)
     params: list = [*states, *domain_states]
     # The joins and the ms_offset guard must MATCH `select()` exactly. If this
     # count is broader, `enrich` reports pending work it cannot actually reach:
@@ -84,6 +88,7 @@ def select(
     *,
     limit: int | None = None,
     dump_run: str | None = None,
+    policy=None,
 ) -> list[Candidate]:
     """Candidates, **ordered by byte offset**.
 
@@ -93,7 +98,8 @@ def select(
     all ~100 of them. On an SSD that is a modest win; on the spinning external
     drive this project expects, it is the difference between minutes and hours.
     """
-    domain_states = sorted(DOMAIN_ENRICH_TRIGGER_STATES)
+    domain_states = sorted(policy.enrich.domain_trigger_states if policy
+                           else DOMAIN_ENRICH_TRIGGER_STATES)
     params: list = [*states, *domain_states]
     sql = [
         "SELECT e.id, e.page_id, p.ms_offset, p.title, e.url_raw, u.state",

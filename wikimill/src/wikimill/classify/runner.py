@@ -16,8 +16,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from ..config import Config
-from ..constants import CLASSIFIER_VERSION
 from ..logging import RunLog
+from ..policy import load as load_policy
 from ..storage import open_db
 from . import state as state_mod
 from .rules import Observation, classify
@@ -62,6 +62,7 @@ def run(
 ) -> ReclassifyStats:
     """Re-judge stored evidence. No network access whatsoever."""
     stats = ReclassifyStats()
+    policy = load_policy(cfg.root)
 
     with open_db(cfg.db_path) as conn:
         rows = latest_checks(conn, limit)
@@ -72,7 +73,8 @@ def run(
 
         log.ok(
             "reclassify",
-            f"{len(rows):,} stored observation(s) · classifier v{CLASSIFIER_VERSION} "
+            f"{len(rows):,} stored observation(s) · classifier "
+            f"v{policy.effective_classifier_version} "
             "· no network",
         )
 
@@ -85,16 +87,20 @@ def run(
             ).fetchone()
             if (
                 existing
-                and existing["classifier_version"] >= CLASSIFIER_VERSION
+                # Equality, not `>=`: policy versions are not ordered. Two
+                # different marker lists at the same CLASSIFIER_VERSION are
+                # different rules, and neither is "newer" than the other.
+                and existing["classifier_version"] == policy.effective_classifier_version
                 and not force
             ):
                 stats.already_current += 1
                 stats.distribution[existing["classification"]] += 1
                 continue
 
-            verdict = classify(Observation.from_row(row))
+            verdict = classify(Observation.from_row(row), policy)
             state_mod.record(
-                conn, check_id=row["id"], url_hash=row["url_hash"], verdict=verdict
+                conn, check_id=row["id"], url_hash=row["url_hash"], verdict=verdict,
+                policy=policy,
             )
             stats.classified += 1
             stats.distribution[verdict.classification] += 1
@@ -116,7 +122,7 @@ def run(
         log.warn(
             "skipped",
             f"{stats.already_current:,} already judged by classifier "
-            f"v{CLASSIFIER_VERSION} (--force to redo)",
+            f"v{policy.effective_classifier_version} (--force to redo)",
         )
     if stats.changed:
         log.warn("verdicts changed", f"{stats.changed:,} differ from the previous run")

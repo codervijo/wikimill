@@ -113,7 +113,7 @@ _PERMANENT_KINDS = {
 }
 
 
-def classify(obs: Observation) -> Verdict:
+def classify(obs: Observation, policy=None) -> Verdict:
     """Judge one observation. Pure — same input, same verdict, forever."""
     # 0. Never fetched.
     if obs.robots_decision and "disallow" in obs.robots_decision.lower():
@@ -148,7 +148,7 @@ def classify(obs: Observation) -> Verdict:
         return Verdict(UrlState.TEMPORARILY_UNAVAILABLE, [f"HTTP {status}"], 1.0)
 
     if 200 <= status < 300:
-        return _classify_content(obs)
+        return _classify_content(obs, policy)
 
     if 400 <= status < 500:
         # 401/403/451 and friends: the page is not accessible to us, but the
@@ -164,13 +164,13 @@ def classify(obs: Observation) -> Verdict:
     return Verdict(UrlState.UNCLASSIFIED, [f"unhandled HTTP {status}"], 0.2)
 
 
-def _classify_content(obs: Observation) -> Verdict:
+def _classify_content(obs: Observation, policy=None) -> Verdict:
     """2xx: the only place guesswork lives. Ordered most- to least-valuable."""
     title, body = obs.page_title, obs.evidence
     reasons: list[str] = []
 
-    strong_park, weak_park = signals.parking_signals(title, body)
-    sale = signals.for_sale_signals(title, body)
+    strong_park, weak_park = signals.parking_signals(title, body, policy)
+    sale = signals.for_sale_signals(title, body, policy)
 
     # for_sale = parked AND an explicit sale offer. The two together are the
     # highest-value verdict the crawler alone can produce.
@@ -188,7 +188,7 @@ def _classify_content(obs: Observation) -> Verdict:
     if sale:
         return Verdict(UrlState.FOR_SALE, [f"sale:{s}" for s in sale], 0.6)
 
-    verdict = _soft_404(obs)
+    verdict = _soft_404(obs, policy)
     if verdict is not None:
         return verdict
 
@@ -202,14 +202,14 @@ def _classify_content(obs: Observation) -> Verdict:
     return Verdict(UrlState.LIVE, [f"HTTP {obs.http_status}"], 0.9)
 
 
-def _soft_404(obs: Observation) -> Verdict | None:
+def _soft_404(obs: Observation, policy=None) -> Verdict | None:
     """A 200 that is really a not-found page.
 
     Scored and corroborated rather than fired on a single match: marking a live
     site dead is the error the operator would act on, so one weak signal is
     never enough.
     """
-    title_hits, body_hits = signals.soft_404_signals(obs.page_title, obs.evidence)
+    title_hits, body_hits = signals.soft_404_signals(obs.page_title, obs.evidence, policy)
     score = 0
     reasons: list[str] = []
 
@@ -228,7 +228,8 @@ def _soft_404(obs: Observation) -> Verdict | None:
             score += 1
             reasons.append("deep path redirected to site root")
 
-    if (obs.content_length or 0) < signals.THIN_BODY_BYTES:
+    thin = policy.classify.thin_body_bytes if policy else signals.THIN_BODY_BYTES
+    if (obs.content_length or 0) < thin:
         score += 1
         reasons.append(f"thin body ({obs.content_length}b)")
 
