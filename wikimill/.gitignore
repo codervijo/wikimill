@@ -38,3 +38,6 @@ htmlcov/
 *.swp
 
 *.log
+
+# Policy config — real values are the operator's; the .example is committed
+wikimill.toml

@@ -24,6 +24,7 @@ from .domain import runner as domain_stage
 from .enrich import runner as enrich_stage
 from . import export as export_mod
 from . import inspect as inspect_mod
+from . import policy as policy_mod
 from . import score as score_mod
 from .config import load as load_config
 from .constants import EXIT_INTERRUPTED, EXIT_OK, RunKind
@@ -183,6 +184,75 @@ def ingest(
             dry_run=dry_run,
             include_namespaces=include_namespaces,
         )
+
+
+config_app = typer.Typer(help="Inspect and validate the policy config.")
+app.add_typer(config_app, name="config")
+
+
+@config_app.command("show")
+def config_show(
+    json_out: Annotated[bool, typer.Option("--json", help="Emit as JSON.")] = False,
+    changed: Annotated[
+        bool, typer.Option("--changed", help="Only values differing from defaults.")
+    ] = False,
+) -> None:
+    """Show the effective policy and where each value came from."""
+    cfg = load_config()
+    pol = policy_mod.load(cfg.root)
+    base = policy_mod.Policy()
+    rows = pol.describe()
+    baseline = {(s, k): v for s, k, v in base.describe()}
+    if changed:
+        rows = [(s, k, v) for s, k, v in rows if baseline[(s, k)] != v]
+
+    if json_out:
+        typer.echo(jsonlib.dumps({
+            "source": pol.source,
+            "effective_classifier_version": pol.effective_classifier_version,
+            "is_default": pol.is_default,
+            "values": [{"section": s, "key": k, "value": v,
+                        "default": baseline[(s, k)] == v} for s, k, v in rows],
+        }, indent=2, default=str))
+        return
+
+    typer.echo(f"source: {pol.source}")
+    typer.echo(f"classifier version: {pol.effective_classifier_version}"
+               + ("  (defaults)" if pol.is_default else "  (customised)"))
+    if not rows:
+        typer.echo("\nnothing differs from the built-in defaults.")
+        return
+    typer.echo("")
+    section = None
+    for sec, key, value in rows:
+        if sec != section:
+            typer.echo(f"[{sec}]")
+            section = sec
+        mark = " " if baseline[(sec, key)] == value else "*"
+        shown = value if not isinstance(value, (list, dict)) else (
+            f"{len(value)} entries" if len(str(value)) > 60 else value)
+        typer.echo(f" {mark} {key:<32} {shown}")
+    if not changed:
+        typer.echo("\n* = differs from the built-in default")
+
+
+@config_app.command("validate")
+def config_validate() -> None:
+    """Check `wikimill.toml` parses and every key is known."""
+    cfg = load_config()
+    target = cfg.root / policy_mod.POLICY_FILENAME
+    with RunLog(RunKind.PREFLIGHT, cfg.logs_dir) as log:
+        if not target.is_file():
+            log.warn("config", f"no {policy_mod.POLICY_FILENAME} — using built-in defaults")
+            log.progress(f"→ cp {policy_mod.POLICY_EXAMPLE} {policy_mod.POLICY_FILENAME} to start tuning")
+            return
+        pol = policy_mod.load(cfg.root)   # raises ConfigError with a remediation
+        base = policy_mod.Policy()
+        diff = sum(1 for s, k, v in pol.describe()
+                   if {(a, b): c for a, b, c in base.describe()}[(s, k)] != v)
+        log.ok("config", f"{target.name} is valid")
+        log.ok("policy", f"{diff} value(s) differ from defaults")
+        log.ok("classifier version", pol.effective_classifier_version)
 
 
 @app.command()

@@ -278,8 +278,8 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 
 | Phase | Status | Title |
 |---|---|---|
-| v2.A | ⏳ planned | Plan the tier: `wikimill.toml` schema, precedence against env vars, which constants become policy vs. stay code |
-| v2.B | ⏳ planned | **`wikimill.toml` policy config**: loader, validation with typed errors, `config show` / `config validate`, `.example` file, precedence `CLI flag > env > wikimill.toml > built-in default` |
+| v2.A | ✅ done | Plan the tier: `wikimill.toml` schema, precedence, and the policy-vs-code line |
+| v2.B | ✅ done | **`wikimill.toml` policy config**: loader, validation with typed errors, `config show` / `config validate`, `.example` file |
 | v2.C | ⏳ planned | **Move the policy constants into it**: export candidate states, `--min-pages` floor, scoring weights (§ `score.py`), enrichment trigger sets, recheck cadences, expiry watch window, per-host delay and concurrency |
 | v2.D | ⏳ planned | **Operator-editable marker lists**: parking/for-sale/soft-404 signatures, tracking-parameter list, Wikimedia + resolver exclusion lists — with a `CLASSIFIER_VERSION` bump on change so verdicts stay auditable |
 | v2.E | ⏳ planned | Recheck scheduler (§12): `next_check_at`, tiered cadences, `--due` selection, terminal-record protection |
@@ -287,6 +287,20 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 | v2.G | ⏳ planned | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
 | v2.H | ⏳ planned | Enrichment cache: keep decompressed blocks warm across runs when re-enriching a new dump run |
 | v2.I | ✅ done | **Parallel domain checks** — pulled forward ahead of `v2.A` because the v1.J tail sweep needed it |
+
+**v2.A** — ✅ planned 2026-07-26, unblocked by the operator finding candidates worth pursuing. The tier's load-bearing decision is **where the line falls between policy and code**, and it is not arbitrary.
+
+**Tunable — what the tool looks for:** scoring weights, candidate states, the citation floor, enrichment triggers, recheck cadences, marker vocabularies, concurrency and pacing. Every one is a judgement made without evidence in v1; the soak exists to challenge them, and until they are config, "tune it and re-run" is not something the operator can do.
+
+**Not tunable — what protects other people, and what makes results auditable:** per-domain concurrency of 1 (a guarantee to every site we crawl, not a knob — *configurable politeness is politeness you will eventually turn off*), the redirect/body/evidence caps that are SSRF and resource-exhaustion defences, robots.txt obedience, the two-resolver rule for `unregistered`, and the version stamps and licence header that carry provenance and attribution obligations. A test asserts none of these appear as config keys.
+
+**Precedence:** CLI flag > environment > `wikimill.toml` > built-in default. The split stays **`.env` for credentials and environment, `.toml` for policy** — a secret does not belong in a checked-in config file.
+
+**v2.B** — ✅ shipped 2026-07-26. `policy.py`: seven typed sections, 31 tunables, `tomllib` (stdlib), and a `config show` / `config validate` command pair. A missing file is not an error — the defaults are the shipped policy and a fresh checkout must work without one.
+
+**An unknown key is an error, never silently ignored.** A typo that is quietly dropped is worse than a crash: the operator believes they changed a threshold and the tool carries on with the old one. `min_page` instead of `min_pages` fails with the valid key list.
+
+**Version stamping is automatic.** v2.D's requirement was "a `CLASSIFIER_VERSION` bump on change so verdicts stay auditable" — relying on someone remembering to bump a constant. Instead `effective_classifier_version` folds in a fingerprint of every value that affects a verdict (`1+b3bd73bee788`), so editing a weight or a marker list makes stored verdicts distinguishable from ones judged under the old rules, automatically. Non-classifying changes — crawl pacing, concurrency — deliberately do *not* shift it, or unrelated runs would look incomparable.
 
 **v2.I** — ✅ shipped 2026-07-26, out of tier order. Stage 5 was the last sequential stage, at 1.36 domains/sec, making a 112,349-domain tail sweep a 23-hour job. Now **9.46/sec measured on 300 real domains — 7× faster**, bringing the sweep to ~3.3 hours.
 
