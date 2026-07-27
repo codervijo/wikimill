@@ -38,6 +38,7 @@ from ..constants import (
 )
 from ..logging import RunLog, utcnow
 from ..policy import Policy
+from ..progress import Heartbeat
 from ..score import STATE_POINTS, priority_case
 from ..policy import load as load_policy
 from ..storage import open_db
@@ -307,6 +308,8 @@ def run(
                     out.put((target, None, None, exc))
 
             conn.execute("BEGIN")
+            beat = Heartbeat(conn, log.run_id, "check", total=len(targets),
+                             phase="starting")
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [pool.submit(probe, t) for t in targets]
                 done = 0
@@ -314,6 +317,9 @@ def run(
                     try:
                         item = out.get(timeout=10.0)
                     except queue.Empty:
+                        # RDAP is per-registry gated, so quiet stretches are
+                        # normal. Distinguish "waiting" from "wedged" out loud.
+                        beat.touch(phase="waiting on registries")
                         if all(f.done() for f in futures):
                             log.warn(
                                 "workers",
@@ -324,6 +330,8 @@ def run(
                         continue
                     target, dns_result, rdap_result, exc = item
                     done += 1
+                    beat.done = done
+                    beat.advance(0, phase="dns + rdap", current_item=target.domain)
                     if exc is not None:
                         log.warn("check failed", f"{target.domain}: {exc}")
                         continue
@@ -339,6 +347,7 @@ def run(
                         conn.execute("BEGIN")
                     if done % 100 == 0 or done == len(targets):
                         log.progress(f"checked {done:,}/{len(targets):,}")
+            beat.finish("ok")
             conn.execute("COMMIT")
 
         conn.execute(

@@ -363,6 +363,41 @@ MIGRATION_7: Final[tuple[str, ...]] = (
     "CREATE INDEX idx_wiki_usage_domain ON wiki_usage_checks(domain_id, checked_at)",
 )
 
+# v3.B. Live progress for long-running stages.
+#
+# **The one table in this schema that is deliberately NOT append-only.** Every
+# other observation table keeps history because history is the product; this one
+# answers "what is happening right now, and is it stuck?", and a question about
+# *now* is answered by one current row, not by a scan of ten thousand stale
+# ones. It is upserted per (run_id, stage) and is derived state — losing it
+# costs nothing that the run logs do not already hold.
+#
+# `updated_at` is the liveness signal. A row whose `finished_at` is NULL and
+# whose `updated_at` has stopped moving is a stalled stage, and that is
+# detectable from outside the process — which is the whole point, because a
+# wedged crawler looks exactly like a slow one from the inside.
+MIGRATION_8: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE run_progress (
+        run_id       TEXT    NOT NULL,
+        stage        TEXT    NOT NULL,
+        phase        TEXT,
+        done         INTEGER NOT NULL DEFAULT 0,
+        total        INTEGER,
+        -- What the stage is working on this second. The single most useful
+        -- field when something hangs: it names the domain that is hanging.
+        current_item TEXT,
+        note         TEXT,
+        started_at   TEXT    NOT NULL,
+        updated_at   TEXT    NOT NULL,
+        finished_at  TEXT,
+        outcome      TEXT,
+        PRIMARY KEY (run_id, stage)
+    )
+    """,
+    "CREATE INDEX idx_run_progress_live ON run_progress(finished_at, updated_at)",
+)
+
 MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_1,
     MIGRATION_2,
@@ -371,6 +406,7 @@ MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_5,
     MIGRATION_6,
     MIGRATION_7,
+    MIGRATION_8,
 )
 
 LATEST_VERSION: Final = len(MIGRATIONS)

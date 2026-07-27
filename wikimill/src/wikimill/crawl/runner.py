@@ -34,6 +34,7 @@ from ..constants import RunKind, UrlState
 from ..errors import CrawlError
 from ..logging import RunLog, utcnow
 from ..policy import load as load_policy
+from ..progress import Heartbeat
 from ..score import URL_DEATH_POINTS, priority_case
 from ..storage import open_db
 from . import robots as robots_mod
@@ -354,6 +355,7 @@ def run(
         # concurrent `stats` or `inspect` write fails on busy_timeout. Re-crawling
         # is not cheap: it costs real requests to other people's servers.
         conn.execute("BEGIN")
+        beat = Heartbeat(conn, log.run_id, "crawl", total=pending, phase="starting")
         try:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [
@@ -368,6 +370,10 @@ def run(
                     try:
                         item = out.get(timeout=5.0)
                     except queue.Empty:
+                        # Nothing arrived in 5s. Say so rather than going quiet:
+                        # a polite crawler waiting on a slow host and a wedged
+                        # one look identical from outside unless we speak up.
+                        beat.touch(phase="waiting on workers")
                         # Liveness check. If every worker has exited without
                         # producing the outstanding results, waiting longer would
                         # hang forever — surface it instead.
@@ -394,6 +400,8 @@ def run(
                     task, result, reason = item
                     _record(conn, task, result, reason, stats, policy)
                     done += 1
+                    beat.advance(0, phase="crawling", current_item=task.url[:120])
+                    beat.done = done
                     if done % CHECKPOINT_EVERY == 0:
                         robots_mod.persist_store(conn, robots_store)
                         conn.execute("COMMIT")
@@ -405,10 +413,17 @@ def run(
                         )
         except KeyboardInterrupt:
             stop.set()
+            beat.finish("interrupted", note="Ctrl-C — checkpointed")
             robots_mod.persist_store(conn, robots_store)
             conn.execute("COMMIT")
             log.warn("interrupted", "checkpointed — re-run to resume")
             raise
+        except BaseException as exc:
+            # A crash must leave a row saying it crashed. A row that merely
+            # stopped moving has to be diagnosed by its silence.
+            beat.finish("failed", note=f"{type(exc).__name__}: {exc}")
+            raise
+        beat.finish("ok")
         robots_written = robots_mod.persist_store(conn, robots_store)
         conn.execute("COMMIT")
 

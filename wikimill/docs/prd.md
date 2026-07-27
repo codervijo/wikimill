@@ -381,39 +381,48 @@ Measures what the pipeline's expensive stage is actually worth, then adds a **se
 
 | Phase | Status | Title |
 |---|---|---|
-| v3.A | ✅ done | Plan the tier — reordered around measured evidence; report surface settled |
-| v3.B | ⏳ planned | **Crawl yield measurement**: does HTTP crawling surface candidates DNS+RDAP alone did not? A bounded, unbiased sample and a go/no-go for `v3.F` |
-| v3.C | ⏳ planned | **`report` command**: one self-contained HTML file — candidate table with clickable Wikipedia citations, per-candidate score breakdown, corpus funnel, stage status, state distribution, provenance. No network, no CDN, inline CSS |
-| v3.D | ⏳ planned | **Large bounded ingest** (~10–20× the current corpus): measure DB growth and cardinality curves before committing to all of enwiki |
-| v3.E | ⏳ planned | Storage decision point: does SQLite hold, or is Postgres warranted? Evidence-driven, ADR-recorded |
-| v3.F | ⏳ planned | Crawl throughput tuning within the politeness envelope — **conditional on v3.B** |
+| v3.A | ✅ done | Plan the tier — then scope it down to the operator's actual requirement |
+| v3.B | ✅ done | **Heartbeat + `report`**: long stages record liveness as they work; one self-contained, filterable HTML page shows the domains found *and* what is running now |
+| ~~v3.C~~ | dropped | ~~Crawl yield measurement~~ — existed only to gate v3.F |
+| ~~v3.D~~ | dropped | ~~Large bounded ingest~~ — the page renders what is already in the database |
+| ~~v3.E~~ | dropped | ~~Storage decision (SQLite vs Postgres)~~ — not a problem this project has at 1.6 GB |
+| ~~v3.F~~ | dropped | ~~Crawl throughput tuning~~ — fell with v3.C, which was its go/no-go |
 
-**v3.A** — ✅ planned 2026-07-26. The tier as originally sketched put reporting first and scale last. Three measurements taken at the start of the tier reordered it.
+**v3.A** — ✅ 2026-07-26/27. The tier was first planned as six phases: reporting, a crawl-yield measurement, a large ingest, a storage decision, throughput tuning. The operator then stated the actual requirement — *observability about domains found, through filters, on a web page* — and four of those phases were revealed as speculation rather than operator-felt friction. They were dropped rather than delivered.
 
-| | |
-|---|---|
-| Corpus ingested | 27,152 pages → 1.43M links → 1.33M URLs → 135,591 domains |
-| Database size | 1.6 GB — about **62 KB per ingested page** |
-| Domain checks (DNS + RDAP) | 135,591 domains in **1.9 h** at 16.2/sec → **1,702** candidates |
-| HTTP crawl | **440 of 1,326,045 URLs — 0.03%**, at 0.61 URL/s |
+What survived the cut, and why the rest did not:
 
-**The crawl is the expensive stage and it is essentially unexercised.** At the measured 0.61 URL/s, crawling the current corpus is a **~25-day continuous job**. That rate is bounded by politeness — one request per registrable domain plus a per-host delay — and those are not knobs, so `v3.F` cannot recover much of it.
+- **Crawl yield measurement** existed only to decide whether throughput tuning was worth doing. Drop the tuning and its gate goes with it.
+- **Storage (SQLite vs Postgres)** is not a problem at 1.6 GB. It becomes one if the corpus grows an order of magnitude; that is a reason to revisit it then, not to pre-decide it now.
+- **A larger ingest** only matters if the operator wants *more* domains. The requirement was visibility into the ones already found.
 
-**Every candidate found so far came from domain checks, not from crawling.** DNS + RDAP swept the whole corpus in under two hours and produced all 1,702. Meanwhile `for_sale` = 1 and `parked` = 0 across 135,591 domains — and those are exactly the states only the crawl can produce. So the crawl's marginal yield is **unmeasured**, and a 25-day job of unknown value is a larger open question than either reporting or storage. It becomes `v3.B`.
+This is the "don't manufacture work" rule catching a real instance of it. The measurements in the first draft of this plan were sound; the conclusion drawn from them — that they implied four more phases — was not.
 
-**Surface decision — settled: a `report` command**, the tenth verb. The alternative was `export --format html`, which adds no verb and keeps the CLI at nine. It was rejected because the artefact wanted is a dashboard — corpus funnel, stage status, distributions, provenance — and only part of it is a candidate list. Making it a format would force the rest to masquerade as an export or be dropped, which is worse than one honest verb. This also merges the old v3.B and v3.C: they were always one file.
+**v3.B** — ✅ shipped 2026-07-27. Two requirements, one file.
 
-**Scale decision — a large bounded ingest before all of enwiki.** At ~62 KB per ingested page the extrapolation to a full ingest runs to hundreds of GB. Domains dedupe sublinearly so that over-states it, but not by an order of magnitude, and it would likely force `v3.E`'s storage question *during* the ingest rather than after. A ~10–20× ingest measures the growth and cardinality curves for real, and replaces the extrapolation above with data.
+**The page.** `wikimill report` writes one self-contained HTML file. Every candidate is embedded with its state, score, citation count, live count, removal count, registrar, expiry and an example Wikipedia citation deep-linked to its section. Filtering is client-side over the embedded rows — text search plus state toggles plus sortable columns — because the page is a file, not a service, and there is nothing to query. Measured on the real corpus: **2,967 candidates, 1.8 MB, and the only external references are hyperlinks to Wikipedia and to the CC BY-SA licence.** No script src, no link href, no font, no image. It opens with the network off.
 
-**`v3.B` in detail.** The question: *does crawling find candidates that DNS + RDAP alone did not?*
+**The liveness.** The second requirement arrived mid-build: *in long-running processes, I want to see what is going on, whether it is getting stuck.* A crawler being polite and a crawler being wedged produce identical output — nothing — so the only thing that separates them is whether the process says so. `run_progress` is one upserted row per (run, stage) carrying `done`/`total`, the item currently being worked, and `updated_at`. A row with no `finished_at` whose `updated_at` has stopped moving is a **stalled** stage, and that is detectable from another terminal without attaching a debugger.
 
-- A bounded sample of **≥5,000 URLs** (~2.3 h at the measured rate). The sample is unbiased for free: never-checked URLs order by `url_hash`, which is effectively random.
-- Measure candidates the crawl found that the domain sweep had not flagged — chiefly `parked`, `for_sale`, `soft_404` on domains currently recorded `active`.
-- Measure **candidates per hour** for each stage, so the two are compared on cost rather than on count. The domain sweep's figure is already known: ~896/h.
-- Measure how many crawled URLs belong to domains *already* known `unregistered`, since that is effort spent re-confirming a settled answer.
-- Deliverable: a section in `docs/soak-report.md` and an explicit **go/no-go for `v3.F`**. If the crawl's marginal yield is negligible, tuning its throughput is optimising work that should not be done at all, and the honest outcome is to drop `v3.F` rather than ship it.
+`report --watch N` regenerates the page on an interval and prints one line per cycle, so the terminal and the browser both show movement. Demonstrated against a real 40-URL crawl:
 
-No new code is expected for `v3.B` beyond whatever analysis the comparison needs — `crawl --limit` already does the work. It is a measurement phase, and saying so is better than inventing a feature to justify it.
+```
+↷ 16:32:25 crawl 52.5% 21/40  https://api.semanticscholar.org/CorpusID:144780750
+```
+
+Stage, percent, count, and the URL being fetched at that instant — which is the field that distinguishes "hung" from "waiting on a DNS timeout for that host".
+
+**Design notes that are load-bearing rather than decorative:**
+
+- **`run_progress` is the one table here that is deliberately not append-only.** Everything else keeps history because history is the product; this answers a question about *now*, and one current row beats scanning ten thousand stale ones. It is derived state and losing it costs nothing.
+- **The heartbeat is throttled and never fatal.** Writing on every item turns an I/O-bound loop into a database-bound one, so writes are rate-limited by wall clock with the final write forced. Every write is best-effort: the crawl matters, its bookkeeping does not. A test drops the table mid-run and asserts the run survives.
+- **A crash leaves a row saying it crashed**, rather than a row that merely went quiet and has to be diagnosed by its silence.
+- **A finished stage is never stalled, however old.** Otherwise every completed run eventually turns red and the operator learns to ignore the signal.
+- **The page only auto-refreshes while a stage is running.** A page that reloads forever fights the person trying to read it.
+- **Written whole, then moved into place**, so a browser mid-refresh never reads a half-written file.
+- **Truncation is stated, never silent.** Showing 3,000 of 50,000 rows without saying so reads as complete.
+
+**Portability — this was commissioned as a pilot for other crawlers.** Nothing in `progress.py` is wikimill-specific: stage names are strings, counters are integers, and the only dependency is a SQLite connection and one table. The pattern is *heartbeat-with-current-item plus stall-by-staleness*, and it transfers to any pipeline with stages long enough that silence is ambiguous.
 
 **Constraints already known.** The file must be self-contained and open offline from `outputs/` — no CDN, no webfonts, no analytics. It carries the same CC BY-SA header and per-row attribution as the CSV, because anchor text and section names are Wikipedia excerpts either way (§17). And it must be **deterministic in its data** like the CSV, so two reports diff meaningfully; the generated-at stamp stays outside the hashed content.
 

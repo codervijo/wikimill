@@ -26,6 +26,7 @@ from . import export as export_mod
 from . import inspect as inspect_mod
 from . import diff as diff_mod
 from . import policy as policy_mod
+from . import report as report_mod
 from . import schedule as schedule_mod
 from . import verify as verify_mod
 from . import score as score_mod
@@ -614,6 +615,97 @@ def export_cmd(
                 f"0 candidates matched — nothing is in {', '.join(states)} "
                 f"with >= {floor} citing page(s)",
             )
+
+
+@app.command()
+def report(
+    out: Annotated[
+        str | None, typer.Option("--out", help="Output path. Defaults to "
+                                               "outputs/report.html.")
+    ] = None,
+    state: Annotated[
+        str | None, typer.Option("--state", help="Comma-separated states to show.")
+    ] = None,
+    min_pages: Annotated[
+        int | None, typer.Option("--min-pages", help="Minimum citing pages.")
+    ] = None,
+    limit: Annotated[
+        int, typer.Option("--limit", help="Max candidate rows embedded in the page.")
+    ] = report_mod.MAX_ROWS,
+    watch: Annotated[
+        float,
+        typer.Option("--watch", help="Regenerate every N seconds until "
+                                     "interrupted. The page reloads itself while "
+                                     "a stage is running."),
+    ] = 0.0,
+) -> None:
+    """Write a self-contained HTML page: candidates found, and what is running now."""
+    import time as _time
+
+    cfg = load_config()
+    pol = policy_mod.load(cfg.root)
+    states = (
+        [s.strip() for s in state.split(",") if s.strip()] if state
+        else [str(x) for x in pol.export.candidate_states]
+    )
+    floor = min_pages if min_pages is not None else pol.export.min_pages
+    path = Path(out) if out else cfg.outputs_dir / "report.html"
+
+    with RunLog(RunKind.EXPORT, cfg.logs_dir, quiet=watch > 0) as log:
+        gate(cfg, log)
+        interval = max(1, int(watch)) if watch else 0
+
+        def once() -> report_mod.ReportData:
+            with open_db(cfg.db_path) as conn:
+                data = report_mod.collect(conn, cfg, states, floor, limit)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Written whole then moved, so a browser mid-refresh never reads a
+            # half-written page — the failure mode `--watch` would otherwise hit
+            # constantly.
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(report_mod.render(data, interval), encoding="utf-8")
+            tmp.replace(path)
+            return data
+
+        if not watch:
+            data = once()
+            log.ok("report", f"{data.total_candidates:,} candidate(s) -> {path}")
+            if data.stalled:
+                log.warn(
+                    "stalled",
+                    f"{len(data.stalled)} stage(s) have stopped reporting progress",
+                )
+            elif data.live:
+                log.ok("live", f"{len(data.live)} stage(s) running")
+            log.progress(f"open it with: xdg-open {path}")
+            return
+
+        # Watch mode: the operator has a browser open on the file and wants to
+        # see a long run move. Print one line per regeneration so the terminal
+        # shows liveness too, not only the page.
+        print(f"\033[32m✓\033[0m watching — {path} every {interval}s, Ctrl-C to stop",
+              flush=True)
+        try:
+            while True:
+                data = once()
+                stamp = data.generated_at[11:19]
+                if data.stalled:
+                    names = ", ".join(s.stage for s in data.stalled)
+                    print(f"\033[31m✗\033[0m {stamp} stalled: {names}", flush=True)
+                elif data.live:
+                    for s in data.live:
+                        pct = f" {s.percent:.1f}%" if s.percent is not None else ""
+                        print(f"\033[33m↷\033[0m {stamp} {s.stage}{pct} "
+                              f"{s.done:,}"
+                              f"{'/' + format(s.total, ',') if s.total else ''}"
+                              f"  {(s.current_item or '')[:60]}", flush=True)
+                else:
+                    print(f"\033[32m✓\033[0m {stamp} idle · "
+                          f"{data.total_candidates:,} candidates", flush=True)
+                _time.sleep(interval)
+        except KeyboardInterrupt:
+            print(f"\033[32m✓\033[0m stopped — {path} holds the last render",
+                  flush=True)
 
 
 def main() -> None:

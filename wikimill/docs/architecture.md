@@ -16,7 +16,7 @@ wikimill/
 ├── wikimill.env.example       # every variable documented — no secrets
 ├── main.py                    # root entry so the builder's `make run` works
 ├── src/wikimill/
-│   ├── cli.py                 # Typer app — the 9 commands
+│   ├── cli.py                 # Typer app — 10 commands + `config`
 │   ├── config.py              # env loading, precedence, redaction
 │   ├── constants.py           # canonical enums/versions/defaults
 │   ├── markers.py             # v2.C: marker word lists — a leaf, see below
@@ -61,10 +61,12 @@ wikimill/
 │   ├── diff.py                # v2.G: cross-dump-run link transitions
 │   ├── verify.py              # v2.F: does the live wiki still link here?
 │   ├── schedule.py            # v2.E: what's due, answered from the DB alone
+│   ├── progress.py            # v3.B: heartbeat — alive? how far? stuck on what?
+│   ├── report.py              # v3.B: the self-contained HTML page
 │   ├── score.py               # v1.I: explainable ranking (never exclusion)
 │   ├── inspect.py             # v1.I: everything known about one thing
 │   └── export.py              # v1.I: deterministic, attributable candidate file
-├── tests/                     # 582 tests, hermetic (no network, no Docker)
+├── tests/                     # 606 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -239,7 +241,7 @@ registrar pages are never scraped.
 
 ## 8. Storage
 
-SQLite, single file, WAL, at `state/wikimill.db`. Fourteen tables (schema in `storage/schema.py`, documented in `prd.md` §9).
+SQLite, single file, WAL, at `state/wikimill.db`. Fifteen tables (schema in `storage/schema.py`, documented in `prd.md` §9).
 
 **Load-bearing invariants:**
 
@@ -272,6 +274,41 @@ The launcher forwards every other host `WIKIMILL_*` variable with `-e` *after* `
 **Keyed on `(dump_run, page_id, lang)`, never on `ms_offset`.** Offset X in one run's archive is a different block from offset X in another's, and article text changes between runs — an offset-keyed cache would serve one revision's wikitext for a link recorded against another. That is what `check_dump_runs_agree` refuses at ingest; here it would be silent.
 
 Derived and disposable: every row regenerates from the archive, so eviction is plain LRU against a byte budget and clearing costs time rather than information. Redirect stubs are never stored. `--no-cache` forces a read from the dump; `[enrich] cache_enabled` and `cache_max_bytes` are the knobs.
+
+### 8b. Liveness — the heartbeat (v3.B)
+
+**Commissioned as a pilot for the operator's other crawlers, so the mechanism is deliberately project-agnostic:** stage names are strings, counters are integers, and the only dependency is a SQLite connection and one table.
+
+The problem it solves is that *a crawler being polite and a crawler being wedged produce identical output — nothing.* Politeness means one request per registrable domain plus a per-host delay, so long silences are normal and carry no information. The only thing separating "working" from "hung" is whether the process says so.
+
+`run_progress` holds one upserted row per `(run_id, stage)`: `done`/`total`, the item being worked right now, `updated_at`, and `finished_at`. From that, three questions are answerable **from another terminal**:
+
+| Question | Answered by |
+|---|---|
+| Is it alive? | `updated_at` is moving |
+| How far along? | `done`/`total`, with rate and ETA from real elapsed time, not a guess made at the start |
+| What is it stuck on? | `current_item` — the URL or domain being worked when the heartbeat stopped |
+
+That third field is the one that matters in practice. It is the difference between "the crawler hung" and "the crawler is waiting on a DNS timeout for foo.example".
+
+**This is the one table in the schema that is deliberately not append-only.** Everything else keeps history because history is the product. This answers a question about *now*; one current row beats scanning ten thousand stale ones, and it is derived state that costs nothing to lose.
+
+Four rules keep it honest:
+
+- **Throttled** — writing on every item turns an I/O-bound loop into a database-bound one. Rate-limited by wall clock, with the final write forced so the last state is never lost.
+- **Never fatal** — every write is best-effort. The crawl matters; its bookkeeping does not. A test drops the table mid-run and asserts the run survives.
+- **A crash leaves a row saying it crashed**, not a row that went quiet and must be diagnosed by silence.
+- **A finished stage is never stalled, however old** — otherwise every completed run eventually turns red and the operator learns to ignore the signal.
+
+### 8c. The report page (v3.B)
+
+`wikimill report` writes one self-contained HTML file to `outputs/`. It carries every candidate with its evidence, filterable client-side (text, state toggles, sortable columns), plus the corpus funnel, the state distribution, and the live stage view above.
+
+Hard constraints, all deliberate: **no network of any kind** — no CDN, webfont, analytics or external image, so it opens with the wifi off and still works when today's CDN is gone; everything inline, so there are no sidecar assets to lose; the data is deterministic so two reports diff meaningfully; and the CC BY-SA notice plus per-row article links travel with it, because anchor text and section names are Wikipedia excerpts here exactly as in the CSV (§17). Measured: 2,967 candidates, 1.8 MB, external references limited to hyperlinks to Wikipedia and the licence.
+
+`--watch N` regenerates on an interval and prints a line per cycle, so the terminal and the browser both show movement. The file is written whole then moved into place, so a browser mid-refresh never reads a half-written page. The page auto-refreshes **only while a stage is running** — one that reloads forever fights the person trying to read it.
+
+Its visual language is this project's own `✓ ✗ ↷` markers, which the operator already reads fluently from the terminal, carrying the same meanings as in `logging.py` so nothing new has to be learned.
 
 ### 8a. Cross-dump-run diff (v2.G)
 
@@ -347,7 +384,7 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 13. Testing
 
-582 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+606 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness
