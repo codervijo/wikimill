@@ -23,6 +23,7 @@ EXPECTED_TABLES = {
     "url_checks",
     "url_classifications",
     "urls",
+    "wiki_usage_checks",
     "wiki_pages",
 }
 

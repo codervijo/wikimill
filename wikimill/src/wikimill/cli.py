@@ -27,6 +27,7 @@ from . import inspect as inspect_mod
 from . import diff as diff_mod
 from . import policy as policy_mod
 from . import schedule as schedule_mod
+from . import verify as verify_mod
 from . import score as score_mod
 from .config import load as load_config
 from .constants import EXIT_INTERRUPTED, EXIT_OK, RunKind
@@ -548,6 +549,18 @@ def export_cmd(
         str, typer.Option("--format", help="csv or jsonl.")
     ] = "csv",
     out: Annotated[str | None, typer.Option("--out", help="Output path.")] = None,
+    verify_flag: Annotated[
+        bool,
+        typer.Option(
+            "--verify",
+            help="Ask the live Wikipedia API whether it still links to each "
+                 "candidate before exporting. Makes network requests, serially.",
+        ),
+    ] = False,
+    verify_limit: Annotated[
+        int | None,
+        typer.Option("--verify-limit", help="Cap how many candidates are verified."),
+    ] = None,
 ) -> None:
     """Write a self-contained candidate file with full Wikipedia evidence."""
     cfg = load_config()
@@ -565,6 +578,18 @@ def export_cmd(
     floor = min_pages if min_pages is not None else pol.export.min_pages
     with RunLog(RunKind.EXPORT, cfg.logs_dir) as log:
         gate(cfg, log)
+        # The verification pass runs BEFORE the export, never inside it: the
+        # export stays a deterministic, offline function of stored rows, and
+        # its digest keeps meaning what it meant (prd.md §11).
+        if verify_flag:
+            verify_mod.run(
+                cfg, log,
+                states=states,
+                min_pages=floor,
+                limit=verify_limit if verify_limit is not None else pol.verify.limit,
+                endpoint=pol.verify.endpoint,
+                delay=pol.verify.delay_seconds,
+            )
         with open_db(cfg.db_path) as conn:
             conn.execute("BEGIN")
             scored = score_mod.rescore_all(conn, pol)

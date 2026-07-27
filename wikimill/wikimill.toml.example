@@ -117,6 +117,14 @@
 # soft_404_phrases = ["page not found", "page cannot be found", "page could not be found", "page doesn't exist", "page does not exist", "the requested url was not found", "no longer available", "this page has moved", "404 error", "error 404", "http 404", "file not found", "sorry, we couldn't find", "sorry, this page", "we can't find the page", "content not found", "nothing found"]
 # soft_404_title_markers = ["404", "not found", "page missing", "page unavailable", "page removed"]
 
+# Live-wiki verification (v2.F), used only by `export --verify`.
+# The etiquette that protects Wikimedia — serial requests, maxlag, and a contact
+# User-Agent — is structural in the code and deliberately has no key here.
+[verify]
+# endpoint = "https://en.wikipedia.org/w/api.php"
+# delay_seconds = 1.0
+# limit  — omit to verify every candidate the export would emit
+
 # Throughput and pacing. Does not affect verdicts.
 [crawl]
 # concurrency = 8

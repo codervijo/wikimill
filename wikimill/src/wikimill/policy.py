@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from . import constants, markers, score
+from .wiki import usage
 from .errors import ConfigError
 
 POLICY_FILENAME = "wikimill.toml"
@@ -147,6 +148,17 @@ class Markers:
 
 
 @dataclass
+class Verify:
+    """Live-wiki verification (v2.F). Pacing is tunable *downward* in spirit —
+    the etiquette that protects Wikimedia (serial requests, maxlag, a contact
+    User-Agent) is structural in `wiki/usage.py` and has no key here."""
+
+    endpoint: str = usage.DEFAULT_ENDPOINT
+    delay_seconds: float = 1.0
+    limit: int | None = None
+
+
+@dataclass
 class Crawl:
     concurrency: int = constants.DEFAULT_CONCURRENCY
     delay_seconds: float = constants.DEFAULT_CRAWL_DELAY_SECS
@@ -165,6 +177,7 @@ class Policy:
     classify: Classify = field(default_factory=Classify)
     markers: Markers = field(default_factory=Markers)
     crawl: Crawl = field(default_factory=Crawl)
+    verify: Verify = field(default_factory=Verify)
     source: str = "built-in defaults"
 
     # -- provenance ---------------------------------------------------------
@@ -205,9 +218,15 @@ class Policy:
 # Loading and validation
 # --------------------------------------------------------------------------
 
-_SECTIONS = {
-    "scoring": Scoring, "export": Export, "enrich": Enrich,
-    "check": Check, "classify": Classify, "markers": Markers, "crawl": Crawl,
+# Derived from `Policy` rather than listed by hand. A hand-maintained copy
+# drifts silently the moment a section is added: the dataclass accepts the new
+# field, `config show` displays it, and only the *loader* rejects it — so the
+# operator is told a documented section is invalid. That happened once, adding
+# [verify]; deriving it removes the whole class of mistake.
+_SECTIONS: dict[str, type] = {
+    f.name: f.type if isinstance(f.type, type) else type(getattr(Policy(), f.name))
+    for f in fields(Policy)
+    if f.name != "source"
 }
 
 

@@ -283,7 +283,7 @@ Adds the **policy configuration file** the CLI design always specified but v1 ne
 | v2.C | ✅ done | **Move the policy constants into it**: export candidate states, `--min-pages` floor, scoring weights (§ `score.py`), enrichment trigger sets, recheck cadences, expiry watch window, per-host delay and concurrency |
 | v2.D | ✅ done | **Operator-editable marker lists**: parking/for-sale/soft-404 signatures, tracking-parameter list, Wikimedia + resolver exclusion lists — with a `CLASSIFIER_VERSION` bump on change so verdicts stay auditable |
 | v2.E | ✅ done | Recheck scheduler (§12): `next_check_at`, tiered cadences, `--due` selection, terminal-record protection |
-| v2.F | ⏳ planned | `exturlusage` verification pass before export ("does enwiki still link here?") |
+| v2.F | ✅ done | `exturlusage` verification pass before export ("does enwiki still link here?") |
 | v2.G | ✅ done | Cross-dump-run diff: links appearing/disappearing between runs — a link *removed* from Wikipedia is its own signal |
 | v2.H | ✅ done | Enrichment cache: keep decompressed blocks warm across runs when re-enriching a new dump run |
 | v2.I | ✅ done | **Parallel domain checks** — pulled forward ahead of `v2.A` because the v1.J tail sweep needed it |
@@ -344,6 +344,22 @@ No new verb: the diff runs inside `ingest` — the moment a second run lands is 
 The cache is derived and disposable, so eviction is plain LRU against a byte budget (256 MB default, both knobs in `[enrich]`), `--no-cache` forces a read from the dump, and clearing it costs time rather than information. Redirect stubs are never stored — they carry no citation context and would masquerade as cached articles.
 
 Two things fixed in passing: eviction deleted a whole 100-row batch regardless of the actual overshoot, which would have made the cache useless at any size near its cap; and `enrich --dry-run` required the archive to exist merely to report what it *would* read. Asking what a run would cost is what an operator does **before** deciding whether to go and plug the drive in, so refusing to answer because the drive is unplugged inverts the point. It now reports the plan either way.
+
+**v2.F** — ✅ shipped 2026-07-26. The export's strongest claim is "cited by N distinct Wikipedia pages" — it is why a candidate is worth anything — and it rests on a dump that may be weeks old. This asks the live wiki whether those citations still exist.
+
+**`export` stays offline and deterministic.** `--verify` runs the pass first, writes to `wiki_usage_checks`, and then the export proper collects from the database exactly as before. The digest still covers a pure function of stored rows. `--verify` is opt-in and never implied; a test asserts a plain export makes no request.
+
+**Etiquette is structural, not configurable** — the same posture as per-domain crawl concurrency. A contact `User-Agent` (refusing to run without one), `maxlag=5` on every request, `Retry-After` obeyed, and **serial requests with no concurrency knob**. v2.I parallelised domain checks because registries are many independent operators; this is one operator's shared cluster, which asks bots to run series of requests sequentially. A test asserts the knob's absence so it is not added later as an oversight.
+
+**The subtle correctness trap:** the Action API reports rate limits and replication lag with **HTTP 200 and an `error` object in the body**. A client checking only status codes records "0 articles link here" — a maximally confident false negative about the single strongest claim in the export. Failures are stored as errors with a NULL count, so "we could not ask" can never later read as "the answer was zero".
+
+**Validated against the real API** (5 candidates, serial, 1 s apart), and the run immediately exposed something the design had assumed away.
+
+**The two counts are not symmetric.** `dump_page_count` counts pages *in the ingested slice*; `live_page_count` counts articles *in all of enwiki*. Our corpus is a 27,152-page slice, so every verified domain came back far larger live than in the dump — `fed.us` 52 → 1,240+, `nrel.gov` 22 → 568. The direction of that asymmetry is what makes the signal safe rather than wrong: since `slice_then ≤ enwiki_then`, a result of `dump > live` proves `enwiki_then > enwiki_now`, and the reported loss `dump − live ≤ enwiki_then − live` is a **lower bound on the true loss**. It will miss removals; it cannot invent one. The converse carries no information at all, so `live > dump` is now reported as *cited beyond slice* — coverage, explicitly not good news about the source. Until the full-enwiki ingest of v3.D, only reductions are informative.
+
+**Not double-counted with v2.G.** Both measure citations editors dropped — the dump-to-dump window sits inside the dump-to-now window — so scoring takes `max()` of the two, not the sum. A test pins it.
+
+The export gains `wiki_pages_live` and `wiki_verified_at` beside `wiki_pages`, blank when unasked (an empty cell reads as "not checked"; a zero reads as "checked, nothing links here"). A truncated count is written as `N+` so a floor is never mistaken for a total.
 
 **v2.I** — ✅ shipped 2026-07-26, out of tier order. Stage 5 was the last sequential stage, at 1.36 domains/sec, making a 112,349-domain tail sweep a 23-hour job. Now **9.46/sec measured on 300 real domains — 7× faster**, bringing the sweep to ~3.3 hours.
 

@@ -59,11 +59,12 @@ wikimill/
 │   │   ├── wikitext.py        #   section, anchor, ref/cite context
 │   │   └── runner.py          #   block batching, single writer
 │   ├── diff.py                # v2.G: cross-dump-run link transitions
+│   ├── verify.py              # v2.F: does the live wiki still link here?
 │   ├── schedule.py            # v2.E: what's due, answered from the DB alone
 │   ├── score.py               # v1.I: explainable ranking (never exclusion)
 │   ├── inspect.py             # v1.I: everything known about one thing
 │   └── export.py              # v1.I: deterministic, attributable candidate file
-├── tests/                     # 552 tests, hermetic (no network, no Docker)
+├── tests/                     # 582 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -238,7 +239,7 @@ registrar pages are never scraped.
 
 ## 8. Storage
 
-SQLite, single file, WAL, at `state/wikimill.db`. Thirteen tables (schema in `storage/schema.py`, documented in `prd.md` §9).
+SQLite, single file, WAL, at `state/wikimill.db`. Fourteen tables (schema in `storage/schema.py`, documented in `prd.md` §9).
 
 **Load-bearing invariants:**
 
@@ -346,7 +347,7 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 13. Testing
 
-552 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+582 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness

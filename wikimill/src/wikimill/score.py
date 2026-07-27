@@ -27,7 +27,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 
-from . import diff
+from . import diff, verify
 from .constants import DomainState, UrlState
 
 SCORER_VERSION = 1
@@ -226,7 +226,15 @@ def evidence_for(conn: sqlite3.Connection, domain_id: int) -> tuple[dict, dict]:
     # Sentinel keys rather than a third return value: `score_domain` stays a
     # pure function of three plain dicts, which is what lets a test score a
     # domain without a database.
-    removed = diff.removal_counts(conn, domain_id)
+    # v2.G and v2.F measure the same phenomenon — citations editors dropped —
+    # by different means, so they are combined with max() rather than added.
+    # Summing would double-count: the dump-to-dump window (v2.G) sits inside the
+    # dump-to-now window (v2.F), and a domain would climb the shortlist twice
+    # for one removal.
+    removed = max(
+        diff.removal_counts(conn, domain_id),
+        verify.citations_lost(conn, domain_id),
+    )
     if removed:
         kinds["__wiki_removed__"] = removed
     return url_states, kinds

@@ -334,6 +334,35 @@ MIGRATION_6: Final[tuple[str, ...]] = (
     "CREATE INDEX idx_page_cache_lru ON page_cache(last_used)",
 )
 
+# v2.F. Live enwiki citation counts, from the Action API's `exturlusage`.
+#
+# Append-only, like every other observation table: each row is what the live
+# wiki said at one moment, kept alongside the earlier answers rather than
+# overwriting them. `dump_page_count` is stored next to `live_page_count` so a
+# row remains interpretable years later without re-deriving what the dump said
+# at the time — the delta is the signal, and half of it would otherwise decay.
+MIGRATION_7: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE wiki_usage_checks (
+        id              INTEGER PRIMARY KEY,
+        domain_id       INTEGER NOT NULL REFERENCES domains(domain_id),
+        checked_at      TEXT    NOT NULL,
+        -- What the live wiki reports now, and what our dump snapshot claimed.
+        live_page_count INTEGER,
+        dump_page_count INTEGER NOT NULL,
+        -- Set when the count stopped at the pagination cap: the number is a
+        -- floor, not a total, and nothing may treat it as exact.
+        truncated       INTEGER NOT NULL DEFAULT 0,
+        api_endpoint    TEXT    NOT NULL,
+        -- NULL on success; the error kind otherwise. A failed check is still
+        -- recorded, so "we could not ask" never reads as "the answer was zero".
+        error_kind      TEXT,
+        latency_ms      INTEGER
+    )
+    """,
+    "CREATE INDEX idx_wiki_usage_domain ON wiki_usage_checks(domain_id, checked_at)",
+)
+
 MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_1,
     MIGRATION_2,
@@ -341,6 +370,7 @@ MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_4,
     MIGRATION_5,
     MIGRATION_6,
+    MIGRATION_7,
 )
 
 LATEST_VERSION: Final = len(MIGRATIONS)

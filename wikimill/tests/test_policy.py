@@ -7,6 +7,8 @@ version automatically.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from wikimill.errors import ConfigError
@@ -157,4 +159,32 @@ def test_safety_invariants_are_not_configurable(forbidden):
 def test_describe_covers_every_section():
     sections = {s for s, _k, _v in Policy().describe()}
     assert sections == {"scoring", "export", "enrich", "check", "classify",
-                        "markers", "crawl"}
+                        "markers", "crawl", "verify"}
+
+
+def test_every_policy_section_is_loadable(tmp_path):
+    """The loader's section list is derived from `Policy`, not maintained beside
+    it. A hand-written copy drifts the moment a section is added: the dataclass
+    accepts the field and `config show` displays it, but the loader rejects the
+    documented section as unknown. That happened once, adding [verify]."""
+    from wikimill.policy import _SECTIONS
+
+    assert set(_SECTIONS) == {
+        f.name for f in dataclasses.fields(Policy) if f.name != "source"
+    }
+    for section in _SECTIONS:
+        load(write(tmp_path, f"[{section}]\n"))
+
+
+def test_the_shipped_example_config_loads(tmp_path):
+    """Every section and key in wikimill.toml.example must be real. A documented
+    key the loader rejects is worse than an undocumented one."""
+    import shutil
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parents[1] / "wikimill.toml.example"
+    shutil.copy(example, tmp_path / POLICY_FILENAME)
+    policy = load(tmp_path)
+    assert policy.fingerprint() == Policy().fingerprint(), (
+        "the example must document defaults, not change them"
+    )

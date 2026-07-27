@@ -30,7 +30,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import diff
+from . import diff, verify
 from .constants import DomainState
 from .logging import utcnow
 
@@ -66,6 +66,11 @@ COLUMNS = (
     # the one piece of evidence that comes from a human who looked at the page,
     # so it should be sortable in a spreadsheet, not buried in a JSON blob.
     "wiki_removed",
+    # v2.F. Blank unless `export --verify` has asked the live wiki. Kept
+    # distinct from wiki_pages so the operator can see the snapshot and the
+    # live answer side by side rather than being handed one merged number.
+    "wiki_pages_live",
+    "wiki_verified_at",
     "archive_url",
     "score_explanation",
 )
@@ -131,6 +136,24 @@ def _representative_citation(conn: sqlite3.Connection, domain_id: int) -> dict:
     }
 
 
+def _live_usage(conn: sqlite3.Connection, domain_id: int) -> dict:
+    """The live citation count, if `--verify` has ever asked.
+
+    Blank rather than zero when unasked: an empty cell reads as "not checked",
+    a zero reads as "checked, and nothing links here" — opposite meanings about
+    the strongest claim in the file.
+    """
+    row = verify.latest(conn, domain_id)
+    if row is None or row["live_page_count"] is None:
+        return {"wiki_pages_live": "", "wiki_verified_at": ""}
+    count = row["live_page_count"]
+    return {
+        # A truncated count is a floor, and must never be read as exact.
+        "wiki_pages_live": f"{count}+" if row["truncated"] else count,
+        "wiki_verified_at": row["checked_at"],
+    }
+
+
 def collect(
     conn: sqlite3.Connection, states: list[str], min_pages: int
 ) -> list[dict]:
@@ -171,6 +194,7 @@ def collect(
             "example_link_kind": "",
             "dead_link_tagged": "",
             "wiki_removed": diff.removal_counts(conn, row["domain_id"]) or "",
+            **_live_usage(conn, row["domain_id"]),
             "archive_url": "",
             "score_explanation": row["score_explanation"] or "",
         }
