@@ -159,12 +159,70 @@ swamps citation weight (+3) — was drawn from a corpus where citation weight co
 not vary. It can now. Re-tuning should wait for a crawl at this scale rather than
 be redone against the same 440 URLs.
 
-## 6. Open items
+## 6. Full-corpus sweep (added 2026-07-26, after v2.I)
 
-- **Crawl at scale.** 0.03% of the corpus is crawled. At 0.61 URL/s a full pass
-  is impractical and unnecessary; a stratified sample (say, everything with 10+
-  citing pages) would be both faster and far more likely to contain something
-  worth having.
+The soak above was written against a 3,242-domain sample. Stage 5 was then
+parallelised (v2.I) and **every domain in the corpus was checked** — 135,591,
+100% coverage, in 1.9 hours at 16.2 domains/sec.
+
+### The find-rate curve, fully measured
+
+| Citing articles | Checked | Available or expiring | Rate |
+|---|---|---|---|
+| **1** | 96,275 | **1,578** | **1.64%** |
+| 2 | 16,988 | 86 | 0.51% |
+| 3–4 | 9,857 | 27 | 0.27% |
+| 5–9 | 6,361 | 7 | 0.11% |
+| 10–24 | 3,517 | 3 | 0.09% |
+| 25–49 | 1,256 | 0 | 0.00% |
+| 50–99 | 676 | 1 | 0.15% |
+| 100+ | 661 | 0 | 0.00% |
+| **total** | **135,591** | **1,702** | **1.26%** |
+
+**Monotonically decreasing.** The single-citation band — written off earlier in
+this report as noise — carries an **18× higher find rate** than the 10–24 band
+and holds **1,578 of the 1,702 finds**. The 2,500 most-cited domains yielded one
+hit, and that one was unbuyable.
+
+**Availability and citation weight are anti-correlated.** What Wikipedia cites
+heavily is maintained; what dies was cited once. That is the opposite of where
+this project expected value to be.
+
+### Two earlier conclusions in this report were wrong
+
+1. **"Citation count predicts survival, not opportunity"** was drawn from the
+   well-cited band alone and generalised. True at that end; the tail behaves
+   entirely differently, and it is where every find actually lives.
+2. **"43% of finds are restricted-suffix"** was a sampling artefact. Across the
+   full corpus it is **153 of 1,702 — 9%**. Government and academic domains are
+   simply over-represented among *well-cited* domains, which is all the middle
+   band contained. **1,549 finds sit on open suffixes.**
+
+Both are recorded rather than edited away: each was a confident generalisation
+from a partial sweep, and each survived until the data contradicted it.
+
+### What this leaves
+
+**Finding available domains is solved. Judging them is not.** 1,549 open-suffix
+candidates exist, overwhelmingly single-citation sites — the same population
+whose first three members the operator rejected for trademark, niche mismatch
+and restricted suffix, none of which wikimill models. The best by citation
+weight: `historylearningsite.co.uk` (17 articles), `investvine.com` (15),
+`matt-thorn.com` (5), `plymouthdata.info` (5), `machinima.com` (4, the defunct
+Machinima Inc., cited by the *Machinima* article itself), `cartage.org.lb` (4),
+`biblioteca.org.ar` (3).
+
+The unresolved question is precision among those 1,549, and nothing in the tool
+can answer it — every value judgement so far has come from the operator.
+
+## 7. Open items
+
+- **Crawl at scale.** 0.03% of the corpus is crawled (440 of 1,326,045). The
+  full-corpus sweep made this less urgent than it looked: domain checks alone
+  found all 1,702 candidates without fetching a single page. Crawling adds
+  `parked` / `for_sale` detection and dead-page evidence, not availability.
+- **Precision on the 1,549.** The single measurement that matters next, and it
+  needs operator verdicts rather than code.
 - **HDD enrichment measurement**, still outstanding.
 - **Operator verdict capture.** All three finds were judged duds by hand, and
   nothing in the tool recorded that. Until verdicts are stored, precision cannot
