@@ -442,7 +442,7 @@ Turns the pipeline around: instead of asking *which dead domains are worth acqui
 | Phase | Status | Title |
 |---|---|---|
 | v4.A | ✅ done | Plan the tier: selection funnel, Internet Archive etiquette, output grain, CLI shape |
-| v4.B | ⏳ planned | **`gaps` command**: Wayback availability adapter, `archive_checks`, the recoverable/lost/unknown partition |
+| v4.B | ✅ done | **`gaps` command**: Wayback availability adapter, `archive_checks`, the recoverable/lost/unknown partition |
 | v4.C | ⏳ planned | **`report --gaps`**: citation-grain HTML artifact in its own file |
 
 **v4.A** — ✅ planned 2026-07-27. Two facts from the existing corpus set the shape, and both were measured rather than assumed.
@@ -473,6 +473,16 @@ citations to dead domains          1,799
 **Deferred:** a preventive pass over *live* citations, to archive at-risk ones before they die. Higher leverage but it means asking about URLs that are not yet dead, and the complete version is ~1.33M requests to a nonprofit. Scope it only once the reactive version proves useful.
 
 **Scope boundary, stated so it is not assumed away.** This tier *finds* gaps. It never edits Wikipedia and never submits anything to any archive. Both are plausible next steps and both need their own decision: editing at scale requires WP:BOT approval, and pushing URLs to the Wayback save endpoint is a write against someone else's infrastructure, not a read.
+
+**v4.B** — ✅ shipped 2026-07-27. `wikimill gaps` asks the Wayback Availability API which dead citations still have a usable copy. Measured on the real corpus: **969 dead URLs with no known archive, across 822 articles** — down from 1,752, because **45% already carry an archive URL Wikipedia recorded for us**. That exclusion is the cheapest-first principle paying out again: it removed 783 requests we would otherwise have spent to learn something we had been told.
+
+**The three-way answer proved itself on the first live run.** Asking at one request per second drew **HTTP 429 on the very first request** — all twenty came back refused. Every one was stored as `unknown` with `error_kind=http:429`; none as `lost`. Had the design collapsed "no answer" into "no copy", that run would have declared twenty citations permanently unrecoverable while they sat in the archive. `has_snapshot` is nullable precisely to make that impossible, and the guard fired for real within a minute of shipping.
+
+**Pacing is measured, not assumed.** 1s fails outright; 10s runs clean. The default is **15s**, past what demonstrably works, because nothing here is time-critical and the far end is a nonprofit absorbing the cost. Refusals back off exponentially on top of that, and five consecutive refusals stop the run — continuing to ask while a service says "slow down" is both rude and pointless, since every answer would be an error. Unasked URLs stay queued.
+
+**Archived is not recovered.** The Internet Archive faithfully preserves 404 pages, so `available: true` with `status: 404` is a capture of an absence. Those count as `lost` and are reported separately, because "there is a snapshot" and "the citation can be fixed" are different claims.
+
+A first real slice returned **3 recoverable, 1 lost** — the lost one being `books.,google.com`, a typo in the Wikipedia source itself, which is its own small finding about what a "dead citation" can turn out to be.
 
 ### v5+ — candidate tiers (not committed)
 

@@ -159,7 +159,7 @@ def test_safety_invariants_are_not_configurable(forbidden):
 def test_describe_covers_every_section():
     sections = {s for s, _k, _v in Policy().describe()}
     assert sections == {"scoring", "export", "enrich", "check", "classify",
-                        "markers", "crawl", "verify"}
+                        "markers", "crawl", "verify", "gaps"}
 
 
 def test_every_policy_section_is_loadable(tmp_path):

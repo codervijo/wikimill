@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from . import constants, markers, score
+from . import wayback
 from .wiki import usage
 from .errors import ConfigError
 
@@ -159,6 +160,20 @@ class Verify:
 
 
 @dataclass
+class Gaps:
+    """Archive-gap checks (v4.B). As with `[verify]`, the etiquette that
+    protects the Internet Archive — serial requests, a contact User-Agent — is
+    structural in `wayback.py` and has no key here."""
+
+    endpoint: str = wayback.DEFAULT_ENDPOINT
+    # Deliberately slow, and measured rather than guessed: 1s drew HTTP 429 on
+    # the very first request, 10s ran clean. This sits well past what worked,
+    # because nothing here is time-critical and the far end is a nonprofit.
+    delay_seconds: float = 15.0
+    limit: int | None = None
+
+
+@dataclass
 class Crawl:
     concurrency: int = constants.DEFAULT_CONCURRENCY
     delay_seconds: float = constants.DEFAULT_CRAWL_DELAY_SECS
@@ -178,6 +193,7 @@ class Policy:
     markers: Markers = field(default_factory=Markers)
     crawl: Crawl = field(default_factory=Crawl)
     verify: Verify = field(default_factory=Verify)
+    gaps: Gaps = field(default_factory=Gaps)
     source: str = "built-in defaults"
 
     # -- provenance ---------------------------------------------------------

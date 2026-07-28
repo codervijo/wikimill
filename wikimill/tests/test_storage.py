@@ -11,6 +11,7 @@ from wikimill.storage.db import user_version
 from wikimill.errors import StorageError
 
 EXPECTED_TABLES = {
+    "archive_checks",
     "crawl_runs",
     "domain_checks",
     "domain_classifications",

@@ -125,6 +125,15 @@
 # delay_seconds = 1.0
 # limit  — omit to verify every candidate the export would emit
 
+# Archive-gap checks (v4.B), used by `gaps`. As with [verify], the etiquette
+# that protects the Internet Archive is structural and has no key here.
+[gaps]
+# endpoint = "https://archive.org/wayback/available"
+# Measured, not guessed: 1s drew HTTP 429 on the first request; 10s ran clean.
+# The default sits past that on purpose — nothing here is time-critical.
+# delay_seconds = 15.0
+# limit  — omit to ask about every dead citation with no known archive
+
 # Throughput and pacing. Does not affect verdicts.
 [crawl]
 # concurrency = 8

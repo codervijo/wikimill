@@ -415,6 +415,39 @@ MIGRATION_9: Final[tuple[str, ...]] = (
     "DROP TABLE IF EXISTS run_progress",
 )
 
+# v4.B. Whether a dead citation can still be recovered from an archive.
+#
+# `has_snapshot` is NULLABLE and that is the important part of this table. NULL
+# means "we could not ask" — a transport failure, a rate limit, a malformed
+# response. It must never be stored as 0, because 0 means "we asked and there is
+# no copy anywhere", which declares a citation permanently lost. That is the one
+# expensive mistake this stage can make, and it is the same trap v2.F found in
+# the Wikimedia API.
+#
+# `requested_timestamp` records *which* moment we asked about. The snapshot that
+# matters is the one closest to when Wikipedia cited the page, not the one
+# closest to today — a later capture may postdate the site's death or its sale.
+MIGRATION_10: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE archive_checks (
+        id                  INTEGER PRIMARY KEY,
+        url_hash            TEXT    NOT NULL,
+        checked_at          TEXT    NOT NULL,
+        has_snapshot        INTEGER,
+        snapshot_url        TEXT,
+        snapshot_timestamp  TEXT,
+        -- The HTTP status the crawler captured. A snapshot of a 404 page is a
+        -- snapshot of nothing, and must not read as a recovered citation.
+        snapshot_status     TEXT,
+        requested_timestamp TEXT,
+        api_endpoint        TEXT    NOT NULL,
+        error_kind          TEXT,
+        latency_ms          INTEGER
+    )
+    """,
+    "CREATE INDEX idx_archive_checks_url ON archive_checks(url_hash, checked_at)",
+)
+
 MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_1,
     MIGRATION_2,
@@ -425,6 +458,7 @@ MIGRATIONS: Final[tuple[tuple[str, ...], ...]] = (
     MIGRATION_7,
     MIGRATION_8,
     MIGRATION_9,
+    MIGRATION_10,
 )
 
 LATEST_VERSION: Final = len(MIGRATIONS)

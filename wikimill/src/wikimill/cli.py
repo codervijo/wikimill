@@ -26,6 +26,7 @@ from . import export as export_mod
 from . import inspect as inspect_mod
 from . import diff as diff_mod
 from . import policy as policy_mod
+from . import gaps as gaps_mod
 from . import report as report_mod
 from . import schedule as schedule_mod
 from . import verify as verify_mod
@@ -615,6 +616,34 @@ def export_cmd(
                 f"0 candidates matched — nothing is in {', '.join(states)} "
                 f"with >= {floor} citing page(s)",
             )
+
+
+@app.command()
+def gaps(
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Max URLs to ask about.")
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force", help="Re-ask about URLs already answered.")
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Report what would be asked, ask nothing."),
+    ] = False,
+) -> None:
+    """Ask the Wayback Machine which dead citations still have a usable copy."""
+    cfg = load_config()
+    pol = policy_mod.load(cfg.root)
+    with RunLog(RunKind.EXPORT, cfg.logs_dir) as log:
+        gate(cfg, log)
+        gaps_mod.run(
+            cfg, log,
+            limit=limit if limit is not None else pol.gaps.limit,
+            force=force,
+            dry_run=dry_run,
+            endpoint=pol.gaps.endpoint,
+            delay=pol.gaps.delay_seconds,
+        )
 
 
 @app.command()

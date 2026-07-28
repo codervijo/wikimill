@@ -16,7 +16,7 @@ wikimill/
 ├── wikimill.env.example       # every variable documented — no secrets
 ├── main.py                    # root entry so the builder's `make run` works
 ├── src/wikimill/
-│   ├── cli.py                 # Typer app — 10 commands + `config`
+│   ├── cli.py                 # Typer app — 11 commands + `config`
 │   ├── config.py              # env loading, precedence, redaction
 │   ├── constants.py           # canonical enums/versions/defaults
 │   ├── markers.py             # v2.C: marker word lists — a leaf, see below
@@ -60,13 +60,15 @@ wikimill/
 │   │   └── runner.py          #   block batching, single writer
 │   ├── diff.py                # v2.G: cross-dump-run link transitions
 │   ├── verify.py              # v2.F: does the live wiki still link here?
+│   ├── wayback.py             # v4.B: Wayback availability adapter
+│   ├── gaps.py                # v4.B: which dead citations can still be saved
 │   ├── schedule.py            # v2.E: what's due, answered from the DB alone
 │   ├── progress.py            # v3.B: heartbeat — alive? how far? stuck on what?
 │   ├── report.py              # v3.B: the self-contained HTML page
 │   ├── score.py               # v1.I: explainable ranking (never exclusion)
 │   ├── inspect.py             # v1.I: everything known about one thing
 │   └── export.py              # v1.I: deterministic, attributable candidate file
-├── tests/                     # 607 tests, hermetic (no network, no Docker)
+├── tests/                     # 640 tests, hermetic (no network, no Docker)
 ├── state/                     # host-mounted, gitignored: DB, logs, dumps
 └── outputs/                   # host-mounted, gitignored: exports
 ```
@@ -241,7 +243,7 @@ registrar pages are never scraped.
 
 ## 8. Storage
 
-SQLite, single file, WAL, at `state/wikimill.db`. Fifteen tables (schema in `storage/schema.py`, documented in `prd.md` §9).
+SQLite, single file, WAL, at `state/wikimill.db`. Sixteen tables (schema in `storage/schema.py`, documented in `prd.md` §9).
 
 **Load-bearing invariants:**
 
@@ -530,7 +532,7 @@ Deps are baked into the image; **source is bind-mounted**, so code edits need no
 
 ## 13. Testing
 
-607 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
+640 tests, all hermetic — no network, no Docker, no real dumps. `pytest` runs inside the container (`make test`).
 
 - `test_config.py` — precedence, identity, redaction, typed accessors
 - `test_storage.py` — migrations, idempotency, WAL, append-only shape, uniqueness
