@@ -435,14 +435,56 @@ Stage, percent, count, and the URL being fetched at that instant — which is th
 
 **Constraints already known.** The file must be self-contained and open offline from `outputs/` — no CDN, no webfonts, no analytics. It carries the same CC BY-SA header and per-row attribution as the CSV, because anchor text and section names are Wikipedia excerpts either way (§17). And it must be **deterministic in its data** like the CSV, so two reports diff meaningfully; the generated-at stamp stays outside the hashed content.
 
-### v4+ — candidate tiers (not committed)
+### v4 — Archive gaps
 
-Reactive; not scoped until v1–v3 soak.
+Turns the pipeline around: instead of asking *which dead domains are worth acquiring*, it asks **which dead citations can still be recovered, and which are already lost**. Same machinery, and the output is a contribution back rather than an extraction.
+
+| Phase | Status | Title |
+|---|---|---|
+| v4.A | ✅ done | Plan the tier: selection funnel, Internet Archive etiquette, output grain, CLI shape |
+| v4.B | ⏳ planned | **`gaps` command**: Wayback availability adapter, `archive_checks`, the recoverable/lost/unknown partition |
+| v4.C | ⏳ planned | **`report --gaps`**: citation-grain HTML artifact in its own file |
+
+**v4.A** — ✅ planned 2026-07-27. Two facts from the existing corpus set the shape, and both were measured rather than assumed.
+
+**13.2% of citations already carry an archive URL** — 188,538 of 1,433,427. That is free information: normalization unwraps `web.archive.org/…` wrappers at ingest, so we already know which citations Wikipedia has archived without asking anyone.
+
+**The actionable population needs no crawling.** A citation pointing at an `unregistered` domain is dead by definition, and there are **1,799 of them across 1,301 distinct articles** — 1,752 distinct URLs. At the pacing this tier will use that is a ~30-minute run, today, on data already in the database. The crawl dependency this tier appeared to have does not exist.
+
+The funnel, in the project's existing cheapest-first grain:
+
+```
+citations to dead domains          1,799
+  − those already carrying archive_url      (free, already known)
+  → ask Wayback: does a snapshot exist?
+        yes → RECOVERABLE   an edit fixes the citation
+        no  → LOST          irrecoverable; report it as such
+        err → UNKNOWN       we could not ask — never "no"
+```
+
+**The snapshot is requested for the dump run's date**, not for today. The version Wikipedia was citing is the one that matters; the closest snapshot to *now* may postdate the site's death or its sale to someone else.
+
+**Errors are stored as errors with a NULL result.** Declaring a recoverable citation permanently lost is the one expensive mistake this stage can make, and it is exactly the trap v2.F found in the Wikimedia API — HTTP 200 with an error body, which a status-code-only client reads as "nothing found". Same discipline here.
+
+**Etiquette matches the Wikimedia posture** (§v2.F): the Internet Archive is a nonprofit running this service for free, so a contact `User-Agent`, paced serial requests, `Retry-After` obeyed, and no concurrency knob.
+
+**CLI shape, settled with the operator.** `gaps` is its own verb because it is its own stage — `archive` was rejected as a name, since it reads as an imperative and this command never writes to any archive. Rendering stays with `report`, which gains a flag writing a **separate** `outputs/archive-gaps.html`; there is no second reporting verb. The separate file is what lets the artifact be **citation-grain** — article + URL, because the actionable unit is "someone must edit this article" — without distorting the domain-grain `report.html`.
+
+**Deferred:** a preventive pass over *live* citations, to archive at-risk ones before they die. Higher leverage but it means asking about URLs that are not yet dead, and the complete version is ~1.33M requests to a nonprofit. Scope it only once the reactive version proves useful.
+
+**Scope boundary, stated so it is not assumed away.** This tier *finds* gaps. It never edits Wikipedia and never submits anything to any archive. Both are plausible next steps and both need their own decision: editing at scale requires WP:BOT approval, and pushing URLs to the Wayback save endpoint is a write against someone else's infrastructure, not a read.
+
+### v5+ — candidate tiers (not committed)
+
+Reactive; not scoped until earlier tiers soak.
 
 - **Other language wikis / other Wikimedia projects** (dewiki, frwiki, Wikivoyage — Wikivoyage in particular is dense with small-business external links).
 - **Wikimedia Enterprise** — re-evaluate free-tier Structured Contents as an alternative enrichment path once the local multistream path has soaked and its actual pain is known.
 - **Optional LLM classifier** for the ambiguous residue only (soft-404 vs. thin-but-live, unseen parking templates). Opt-in, off the hot path, own ADR, only after the deterministic classifier demonstrably plateaus.
-- **Watch mode** — a long-running recheck loop. Only if manual re-runs prove annoying.
+- **Watch mode** — a long-running recheck loop, or scheduled runs. Mostly a scheduler problem rather than an AI one; needs a run lock, since cron will fire again while a long crawl is still going.
+- **LLM candidate judging** — the operator's own verdict on the first finds ("duds": trademarked, wrong niche) is a *judgement* problem no scoring weight fixes. Off the hot path, after export, stamped with model + prompt version the way `classifier_version` is, so verdicts stay attributable. Kept out of classification, which must stay reproducible.
+- **Wikidata** — a different shape entirely: JSON entities, no wikitext, so enrichment has no analogue. But `P856` (official website) is a *typed, curated* claim, which is stronger evidence than a citation, and SPARQL reaches it without dump processing.
+- **Archive-gap follow-through** — submitting at-risk URLs for archiving, or feeding recoverable ones to editors/IABot. Each is a write against someone else's system and needs its own decision (see v4).
 
 ## 8. Architecture
 
