@@ -667,6 +667,14 @@ def report(
                                      "interrupted. The page reloads itself while "
                                      "a stage is running."),
     ] = 0.0,
+    gaps_page: Annotated[
+        bool,
+        typer.Option(
+            "--gaps",
+            help="Render the archive-gap page instead: dead citations and "
+                 "whether a copy still exists. Writes outputs/archive-gaps.html.",
+        ),
+    ] = False,
 ) -> None:
     """Write a self-contained HTML page: candidates found, and what is running now."""
     import time as _time
@@ -678,27 +686,37 @@ def report(
         else [str(x) for x in pol.export.candidate_states]
     )
     floor = min_pages if min_pages is not None else pol.export.min_pages
-    path = Path(out) if out else cfg.outputs_dir / "report.html"
+    default_name = "archive-gaps.html" if gaps_page else "report.html"
+    path = Path(out) if out else cfg.outputs_dir / default_name
 
     with RunLog(RunKind.EXPORT, cfg.logs_dir, quiet=watch > 0) as log:
         gate(cfg, log)
         interval = max(1, int(watch)) if watch else 0
 
-        def once() -> report_mod.ReportData:
+        def once():
             with open_db(cfg.db_path) as conn:
-                data = report_mod.collect(conn, cfg, states, floor, limit)
+                data = (report_mod.collect_gaps(conn, cfg, limit) if gaps_page
+                        else report_mod.collect(conn, cfg, states, floor, limit))
             path.parent.mkdir(parents=True, exist_ok=True)
             # Written whole then moved, so a browser mid-refresh never reads a
             # half-written page — the failure mode `--watch` would otherwise hit
             # constantly.
             tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(report_mod.render(data, interval), encoding="utf-8")
+            render = report_mod.render_gaps if gaps_page else report_mod.render
+            tmp.write_text(render(data, interval), encoding="utf-8")
             tmp.replace(path)
             return data
 
         if not watch:
             data = once()
-            log.ok("report", f"{data.total_candidates:,} candidate(s) -> {path}")
+            if gaps_page:
+                log.ok("report", f"{data.total_rows:,} dead citation(s) -> {path}")
+                if data.incomplete:
+                    log.warn("last run", "stopped early — re-run `gaps` to continue")
+                if data.remaining:
+                    log.warn("pending", f"{data.remaining:,} not yet asked about")
+            else:
+                log.ok("report", f"{data.total_candidates:,} candidate(s) -> {path}")
             if data.stalled:
                 log.warn(
                     "stalled",
@@ -729,8 +747,9 @@ def report(
                               f"{'/' + format(s.total, ',') if s.total else ''}"
                               f"  {(s.current_item or '')[:60]}", flush=True)
                 else:
-                    print(f"\033[32m✓\033[0m {stamp} idle · "
-                          f"{data.total_candidates:,} candidates", flush=True)
+                    total = (f"{data.total_rows:,} dead citations" if gaps_page
+                             else f"{data.total_candidates:,} candidates")
+                    print(f"\033[32m✓\033[0m {stamp} idle · {total}", flush=True)
                 _time.sleep(interval)
         except KeyboardInterrupt:
             print(f"\033[32m✓\033[0m stopped — {path} holds the last render",

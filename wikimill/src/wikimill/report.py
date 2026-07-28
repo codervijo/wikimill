@@ -587,3 +587,248 @@ def _state_class(state: str) -> str:
     if state == DomainState.ACTIVE:
         return "bad"
     return "warn"
+
+
+# --------------------------------------------------------------------------
+# The archive-gap page (v4.C) — a separate file, citation grain
+# --------------------------------------------------------------------------
+#
+# Its own artifact rather than a section of report.html, because the grain
+# differs: report.html is one row per *domain*, and here the actionable unit is
+# one row per *citation* — someone has to open that article and fix that
+# reference. Folding it in would either bury the article or distort the domain
+# table, so it gets a file.
+#
+# Written for an operator who started a multi-hour run and walked away. The
+# first thing on the page is therefore not the findings but whether the run is
+# still going, and whether it stopped early.
+
+
+@dataclass
+class GapsData:
+    generated_at: str = ""
+    stages: list = field(default_factory=list)
+    counts: dict = field(default_factory=dict)
+    rows: list = field(default_factory=list)
+    total_rows: int = 0
+    truncated: bool = False
+    remaining: int = 0
+
+    @property
+    def live(self):
+        return [s for s in self.stages if s.running]
+
+    @property
+    def stalled(self):
+        """Running, but not moving. For a stage left going overnight this is the
+        difference between "still working" and "wedged hours ago"."""
+        return [s for s in self.stages if s.stalled]
+
+    @property
+    def incomplete(self):
+        """A run that stopped early — the thing you need to see on returning."""
+        return [s for s in self.stages
+                if s.stage == "gaps" and s.outcome == "incomplete"]
+
+
+def collect_gaps(conn: sqlite3.Connection, cfg=None,
+                 limit: int = MAX_ROWS) -> GapsData:
+    """Every dead citation and what the archive said about it."""
+    from . import gaps as gaps_mod
+
+    data = GapsData(generated_at=utcnow())
+    if cfg is not None:
+        try:
+            with contextlib.closing(
+                progress_mod.open_progress_db(cfg.state_dir)
+            ) as beat_conn:
+                data.stages = progress_mod.snapshot(beat_conn, data.generated_at)
+        except sqlite3.Error:
+            data.stages = []
+
+    # One row per citation: article + URL. `LEFT JOIN` on the check so URLs not
+    # yet asked about still appear — "pending" is a real state, and hiding them
+    # would make a partial run look like a complete one.
+    rows = conn.execute(
+        """
+        SELECT e.page_id, p.title, e.section, e.anchor_text, e.url_raw,
+               u.url_hash, u.url_normalized, d.registrable_domain, d.state AS dstate,
+               c.has_snapshot, c.snapshot_url, c.snapshot_timestamp,
+               c.snapshot_status, c.error_kind, c.checked_at
+        FROM external_links e
+        JOIN urls u ON u.url_hash = e.url_hash
+        LEFT JOIN domains d ON d.domain_id = u.domain_id
+        LEFT JOIN wiki_pages p ON p.page_id = e.page_id AND p.dump_run = e.dump_run
+        LEFT JOIN archive_checks c ON c.id = (
+            SELECT MAX(id) FROM archive_checks c2
+            WHERE c2.url_hash = u.url_hash AND c2.error_kind IS NULL
+        )
+        WHERE (u.state IN (?,?,?) OR d.state = ?)
+          AND e.archive_url IS NULL
+        ORDER BY p.title, e.url_raw
+        LIMIT ?
+        """,
+        (*gaps_mod.DEAD_URL_STATES, DomainState.UNREGISTERED, limit),
+    ).fetchall()
+
+    counts = {gaps_mod.RECOVERABLE: 0, gaps_mod.LOST: 0, "pending": 0}
+    out = []
+    for r in rows:
+        if r["checked_at"] is None:
+            state = "pending"
+        else:
+            state = gaps_mod.verdict(r)
+        counts[state] = counts.get(state, 0) + 1
+
+        title = r["title"] or ""
+        url = f"https://en.wikipedia.org/wiki/{title.replace(' ', '_')}" if title else ""
+        if url and r["section"]:
+            url += "#" + r["section"].replace(" ", "_")
+        out.append({
+            "article": title,
+            "article_url": url,
+            "section": r["section"] or "",
+            "anchor": r["anchor_text"] or "",
+            "url": r["url_normalized"] or r["url_raw"],
+            "domain": r["registrable_domain"] or "",
+            "domain_state": r["dstate"] or "",
+            "verdict": state,
+            "snapshot_url": r["snapshot_url"] or "",
+            "snapshot_at": (r["snapshot_timestamp"] or "")[:8],
+            "snapshot_status": r["snapshot_status"] or "",
+        })
+
+    data.rows = out
+    data.counts = counts
+    data.total_rows = len(out)
+    data.remaining = counts.get("pending", 0)
+    data.truncated = len(out) >= limit
+    return data
+
+
+_GAP_VERDICT_CLASS = {"recoverable": "ok", "lost": "bad", "pending": "warn",
+                      "unknown": "warn"}
+
+
+def render_gaps(data: GapsData, refresh_seconds: int = 0) -> str:
+    """The archive-gap page. Self-contained; no network of any kind."""
+    refresh = ""
+    if refresh_seconds and data.live:
+        refresh = f"<meta http-equiv='refresh' content='{int(refresh_seconds)}'>"
+
+    banner = ""
+    if data.incomplete:
+        note = data.incomplete[0].note or ""
+        banner = (
+            "<div class='card pad' style='border-color:var(--bad);margin-bottom:14px'>"
+            "<span class='marker bad'>\u2717</span> <b>The last run stopped early.</b> "
+            f"<span class='what'>{e(note)}</span><br>"
+            "<span class='what'>Nothing was recorded as lost on the strength of a "
+            "refused request \u2014 re-run <code>gaps</code> to continue.</span></div>"
+        )
+
+    stages = "".join(_stage_html(s) for s in data.stages[:4]) or (
+        "<div class='card pad what'>No run has reported progress yet.</div>")
+
+    summary = "".join(
+        f"<tr><td><span class='pill {_GAP_VERDICT_CLASS.get(k, 'warn')}'>{e(k)}</span></td>"
+        f"<td class='num'>{v:,}</td><td class='what'>{e(_GAP_MEANING.get(k, ''))}</td></tr>"
+        for k, v in data.counts.items()
+    )
+
+    present = sorted({r["verdict"] for r in data.rows})
+    filters = "".join(
+        f"<button data-state-filter='{e(v)}' aria-pressed='false'>{e(v)}</button>"
+        for v in present
+    )
+
+    body = []
+    for r in data.rows:
+        search = f"{r['article']} {r['url']} {r['domain']} {r['verdict']}".lower()
+        article = (f"<a href='{e(r['article_url'])}' rel='noreferrer'>{e(r['article'])}</a>"
+                   if r["article_url"] else e(r["article"]))
+        if r["section"]:
+            article += f" <span class='what'>\u00a7{e(r['section'])}</span>"
+        snap = ""
+        if r["snapshot_url"]:
+            snap = (f"<a href='{e(r['snapshot_url'])}' rel='noreferrer'>"
+                    f"{e(r['snapshot_at'])}</a>")
+            if r["snapshot_status"] and r["verdict"] == "lost":
+                snap += f" <span class='what'>(status {e(r['snapshot_status'])})</span>"
+        body.append(
+            f"<tr data-state='{e(r['verdict'])}' data-article='{e(r['article'])}' "
+            f"data-search='{e(search)}'>"
+            f"<td>{article}</td>"
+            f"<td><span class='what'>{e(r['url'][:78])}</span></td>"
+            f"<td>{e(r['domain'])}</td>"
+            f"<td><span class='pill {_GAP_VERDICT_CLASS.get(r['verdict'], 'warn')}'>"
+            f"{e(r['verdict'])}</span></td>"
+            f"<td>{snap}</td></tr>"
+        )
+
+    empty = ("<div class='empty'>No dead citations yet. Run <b>check</b> to find "
+             "dead domains, then <b>gaps</b> to ask the archive.</div>"
+             if not data.rows else "")
+    truncated = (f"<div class='what' style='margin-top:8px'>\u21b7 showing the first "
+                 f"{len(data.rows):,} citations \u2014 raise <code>--limit</code> for more."
+                 f"</div>" if data.truncated else "")
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+{refresh}
+<title>wikimill \u2014 archive gaps</title>
+<style>{_CSS}</style></head><body><div class="wrap">
+
+<h1>archive gaps</h1>
+<div class="sub">
+  Dead Wikipedia citations, and whether a copy still exists.
+  {data.total_rows:,} citation(s) \u00b7 {data.remaining:,} not yet asked about<br>
+  generated {e(data.generated_at)}
+  {" \u00b7 auto-refreshing while a run is going" if refresh else ""}
+</div>
+
+{banner}
+
+<h2>Run status</h2>
+{stages}
+
+<h2>Summary</h2>
+<div class="scroll"><table>
+<thead><tr><th>verdict</th><th class="num">citations</th><th>meaning</th></tr></thead>
+<tbody>{summary}</tbody></table></div>
+
+<h2>Citations</h2>
+<div class="controls">
+  <input type="search" id="q" placeholder="filter by article, URL, domain\u2026">
+  {filters}
+  <span class="count" id="count"></span>
+</div>
+<div class="scroll"><table>
+<thead><tr>
+  <th data-sort="article">article</th><th>dead URL</th><th>domain</th>
+  <th data-sort="state">verdict</th><th>archived copy</th>
+</tr></thead>
+<tbody id="rows">{"".join(body)}</tbody></table>{empty}</div>
+{truncated}
+
+<div class="foot">
+  Article titles, section names and anchor text are excerpts of Wikipedia
+  content, licensed <a href="https://creativecommons.org/licenses/by-sa/4.0/"
+  rel="noreferrer">CC BY-SA 4.0</a> (also GFDL). Each row links to its source
+  article for attribution.
+  <br><br>
+  <b>&quot;lost&quot; means no usable copy was found</b>, not that none can exist \u2014
+  and a citation is never marked lost on the strength of a request the archive
+  refused. Those stay <b>pending</b>.
+</div>
+
+</div><script>{_JS}</script></body></html>"""
+
+
+_GAP_MEANING = {
+    "recoverable": "a usable archived copy exists \u2014 an edit fixes the citation",
+    "lost": "no usable copy found; a capture of a 404 counts as lost",
+    "pending": "not yet asked about \u2014 run `gaps`",
+    "unknown": "the archive could not be reached",
+}

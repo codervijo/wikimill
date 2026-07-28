@@ -328,7 +328,17 @@ def run(
                         f"{index:,}/{len(targets):,} · "
                         f"{stats.recoverable:,} recoverable, {stats.lost:,} lost"
                     )
-            beat.finish("ok")
+            # NOT unconditionally "ok". A circuit-tripped run stopped early,
+            # and an operator who left it running for hours must come back to a
+            # page that says so rather than one implying it finished.
+            if stats.circuit_tripped:
+                beat.finish(
+                    "incomplete",
+                    note=(f"stopped after {CIRCUIT_THRESHOLD} consecutive refusals; "
+                          f"{stats.selected - index:,} URL(s) still queued"),
+                )
+            else:
+                beat.finish("ok")
         except BaseException as exc:
             beat.finish("failed", note=f"{type(exc).__name__}: {exc}")
             raise

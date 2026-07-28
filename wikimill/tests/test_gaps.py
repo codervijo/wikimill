@@ -479,3 +479,127 @@ def test_a_success_resets_the_breaker(cfg):
     stats = run_gaps(cfg, handler)
     assert not stats.circuit_tripped
     assert stats.lost > 0 and stats.unknown > 0
+
+
+def test_a_tripped_run_is_recorded_as_incomplete_not_ok(cfg):
+    """The AFK case. Leave it running for hours, it trips in the first minute,
+    and the status you come back to must not claim it finished."""
+    import contextlib
+
+    from wikimill.progress import open_progress_db, snapshot as progress_snapshot
+
+    with db(cfg) as conn:
+        for i in range(30):
+            seed(conn, url_hash=f"h{i}", url=f"http://d{i}.example/x",
+                 domain=f"d{i}.example", pages=(i + 1,))
+
+    run_gaps(cfg, lambda r: httpx.Response(429, json={}))
+    with contextlib.closing(open_progress_db(cfg.state_dir)) as beat:
+        view = next(v for v in progress_snapshot(beat) if v.stage == "gaps")
+    assert view.outcome == "incomplete"
+    assert "still queued" in (view.note or "")
+
+
+# -- the page (v4.C) --------------------------------------------------------
+
+
+def test_the_gap_page_renders_from_an_empty_database(tmp_path):
+    from wikimill import report as report_mod
+
+    with open_db(tmp_path / "w.db") as conn:
+        page = report_mod.render_gaps(report_mod.collect_gaps(conn))
+    assert "<!doctype html>" in page
+    assert "No dead citations yet" in page
+
+
+def test_the_gap_page_loads_nothing_from_the_network(tmp_path):
+    from wikimill import report as report_mod
+
+    with open_db(tmp_path / "w.db") as conn:
+        seed(conn)
+        page = report_mod.render_gaps(report_mod.collect_gaps(conn))
+    for tag in ("<script src", "<link ", "<img ", "@import", "//cdn", "fonts.g"):
+        assert tag not in page
+
+
+def test_an_unasked_citation_shows_as_pending_not_lost(tmp_path):
+    """Hiding un-asked citations, or defaulting them to lost, would make a
+    partial run look like a finished one."""
+    from wikimill import report as report_mod
+
+    with open_db(tmp_path / "w.db") as conn:
+        seed(conn)
+        data = report_mod.collect_gaps(conn)
+    assert data.counts["pending"] == 1
+    assert data.counts[gaps_mod.LOST] == 0
+    assert data.rows[0]["verdict"] == "pending"
+
+
+def test_the_page_separates_recoverable_from_lost(tmp_path):
+    from wikimill import report as report_mod
+
+    with open_db(tmp_path / "w.db") as conn:
+        seed(conn, url_hash="h1", url="http://a.example/x", domain="a.example")
+        seed(conn, url_hash="h2", url="http://b.example/x", domain="b.example",
+             pages=(2,))
+        conn.execute(
+            "INSERT INTO archive_checks (url_hash, checked_at, has_snapshot, "
+            "snapshot_url, snapshot_status, api_endpoint) "
+            "VALUES ('h1',?,1,'http://web.archive.org/web/1/x','200','e')", (NOW,)
+        )
+        conn.execute(
+            "INSERT INTO archive_checks (url_hash, checked_at, has_snapshot, "
+            "api_endpoint) VALUES ('h2',?,0,'e')", (NOW,)
+        )
+        data = report_mod.collect_gaps(conn)
+        page = report_mod.render_gaps(data)
+    assert data.counts[gaps_mod.RECOVERABLE] == 1
+    assert data.counts[gaps_mod.LOST] == 1
+    assert "web.archive.org" in page
+
+
+def test_an_archived_404_reads_as_lost_on_the_page(tmp_path):
+    from wikimill import report as report_mod
+
+    with open_db(tmp_path / "w.db") as conn:
+        seed(conn)
+        conn.execute(
+            "INSERT INTO archive_checks (url_hash, checked_at, has_snapshot, "
+            "snapshot_url, snapshot_status, api_endpoint) "
+            "VALUES ('h1',?,1,'http://web.archive.org/web/1/x','404','e')", (NOW,)
+        )
+        data = report_mod.collect_gaps(conn)
+    assert data.counts[gaps_mod.LOST] == 1
+
+
+def test_a_stopped_run_is_announced_at_the_top_of_the_page(tmp_path, cfg):
+    """The AFK case again: you come back, open the page, and the first thing it
+    tells you is that the run did not finish."""
+    import contextlib
+
+    from wikimill import report as report_mod
+    from wikimill.progress import open_progress_db
+
+    with db(cfg) as conn:
+        seed(conn)
+    with contextlib.closing(open_progress_db(cfg.state_dir)) as beat:
+        beat.execute(
+            "INSERT INTO run_progress (run_id, stage, done, total, started_at, "
+            "updated_at, finished_at, outcome, note) VALUES "
+            "('r','gaps',5,900,?,?,?,'incomplete','900 URL(s) still queued')",
+            (NOW, NOW, NOW),
+        )
+    with db(cfg) as conn:
+        page = report_mod.render_gaps(report_mod.collect_gaps(conn, cfg))
+    assert "stopped early" in page
+    assert "still queued" in page
+
+
+def test_a_citation_already_carrying_an_archive_url_is_not_listed(tmp_path):
+    """Wikipedia already links a copy; there is no gap to report."""
+    from wikimill import report as report_mod
+
+    with open_db(tmp_path / "w.db") as conn:
+        seed(conn, archive_url="http://web.archive.org/web/2016/x")
+        data = report_mod.collect_gaps(conn)
+    assert data.rows == []

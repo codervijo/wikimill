@@ -443,7 +443,7 @@ Turns the pipeline around: instead of asking *which dead domains are worth acqui
 |---|---|---|
 | v4.A | ✅ done | Plan the tier: selection funnel, Internet Archive etiquette, output grain, CLI shape |
 | v4.B | ✅ done | **`gaps` command**: Wayback availability adapter, `archive_checks`, the recoverable/lost/unknown partition |
-| v4.C | ⏳ planned | **`report --gaps`**: citation-grain HTML artifact in its own file |
+| v4.C | ✅ done | **`report --gaps`**: citation-grain HTML artifact in its own file |
 
 **v4.A** — ✅ planned 2026-07-27. Two facts from the existing corpus set the shape, and both were measured rather than assumed.
 
@@ -483,6 +483,14 @@ citations to dead domains          1,799
 **Archived is not recovered.** The Internet Archive faithfully preserves 404 pages, so `available: true` with `status: 404` is a capture of an absence. Those count as `lost` and are reported separately, because "there is a snapshot" and "the citation can be fixed" are different claims.
 
 A first real slice returned **3 recoverable, 1 lost** — the lost one being `books.,google.com`, a typo in the Wikipedia source itself, which is its own small finding about what a "dead citation" can turn out to be.
+
+**v4.C** — ✅ shipped 2026-07-27. `report --gaps` writes `outputs/archive-gaps.html` — a separate file, same command, **citation grain**: one row per (article, dead URL), because the actionable unit is "someone has to open that article and fix that reference". Folding it into `report.html` would either bury the article or distort the domain table, so it gets a file. Currently **1,002 dead citations, 994 not yet asked about**.
+
+**Written for an operator who started a multi-hour run and walked away**, which changed what goes at the top. The page leads with run status, not findings, and announces an incomplete run in a red banner before anything else.
+
+That requirement caught a real bug. A circuit-tripped run called `beat.finish("ok")` — so a `gaps` run left going overnight that hit five refusals in its first minute would have reported **ok** on return, implying it finished. It now finishes as `incomplete` with the number of URLs still queued, and both the terminal and the page say so.
+
+**Un-asked citations render as `pending`, never as `lost`.** Hiding them, or defaulting them to lost, would make a partial run look like a completed one — the same class of error as reading a refused request as "no copy exists". The page states the distinction in its own footer: *"lost" means no usable copy was found, not that none can exist.*
 
 ### v5+ — candidate tiers (not committed)
 
