@@ -832,3 +832,74 @@ _GAP_MEANING = {
     "pending": "not yet asked about \u2014 run `gaps`",
     "unknown": "the archive could not be reached",
 }
+
+
+# --------------------------------------------------------------------------
+# Keeping the page fresh from inside a long run (v4.D)
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Refresher:
+    """Re-renders the page periodically while a stage is working.
+
+    Without this, the HTML is only written by the `report` command, so a stage
+    left running overnight leaves a page frozen at whenever `report` last ran —
+    it shows nothing happening while everything is. Requiring a second terminal
+    to avoid that is a sharp edge, and forgetting it is silent.
+
+    Deliberately mirrors the heartbeat's discipline:
+
+    * **Throttled by wall clock.** Rendering thousands of rows takes real time;
+      doing it per item would make the page the bottleneck instead of the work.
+    * **Never fatal.** A rendering failure must not kill the crawl it is
+      describing. Failures are counted and reported, not raised.
+    * **Uses the stage's own connection**, so it sees in-flight work and cannot
+      contend for a write lock with the transaction it is rendering from.
+    * **Written whole, then renamed**, so a browser refreshing on a timer never
+      reads a half-written file.
+    """
+
+    cfg: object
+    conn: sqlite3.Connection
+    kind: str = "report"          # "report" | "gaps"
+    interval: float = 30.0
+    path: object = None
+    limit: int = MAX_ROWS
+    states: object = None
+    min_pages: int = 1
+    writes: int = 0
+    failures: int = 0
+    _last: float = 0.0
+
+    def __post_init__(self) -> None:
+        from pathlib import Path as _Path
+        if self.path is None:
+            name = "archive-gaps.html" if self.kind == "gaps" else "report.html"
+            self.path = _Path(self.cfg.outputs_dir) / name
+
+    def maybe(self, *, force: bool = False) -> bool:
+        """Re-render if the interval has elapsed. Returns whether it wrote."""
+        import time as _time
+
+        now = _time.monotonic()
+        if not force and (now - self._last) < self.interval:
+            return False
+        self._last = now
+        try:
+            if self.kind == "gaps":
+                data = collect_gaps(self.conn, self.cfg, self.limit)
+                html_text = render_gaps(data, int(self.interval))
+            else:
+                data = collect(self.conn, self.cfg, self.states, self.min_pages,
+                               self.limit)
+                html_text = render(data, int(self.interval))
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            tmp.write_text(html_text, encoding="utf-8")
+            tmp.replace(self.path)
+            self.writes += 1
+            return True
+        except Exception:  # noqa: BLE001 — see the class docstring
+            self.failures += 1
+            return False

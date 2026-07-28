@@ -219,6 +219,7 @@ def run(
     delay: float = 15.0,
     client=None,
     sleep=time.sleep,
+    refresher=None,
 ) -> GapStats:
     """Ask the archive about dead citations, serially and slowly."""
     from .crawl.fetcher import build_client
@@ -323,6 +324,8 @@ def run(
                     if len(stats.examples) < 10:
                         stats.examples.append((target.url, result.snapshot_status or "—"))
 
+                if refresher is not None:
+                    refresher.maybe()
                 if index % 25 == 0 or index == len(targets):
                     log.progress(
                         f"{index:,}/{len(targets):,} · "
@@ -339,6 +342,10 @@ def run(
                 )
             else:
                 beat.finish("ok")
+            if refresher is not None:
+                # Forced: the last render must reflect the finished state, not
+                # whatever the throttle happened to leave behind.
+                refresher.maybe(force=True)
         except BaseException as exc:
             beat.finish("failed", note=f"{type(exc).__name__}: {exc}")
             raise

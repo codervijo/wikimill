@@ -444,6 +444,7 @@ Turns the pipeline around: instead of asking *which dead domains are worth acqui
 | v4.A | ✅ done | Plan the tier: selection funnel, Internet Archive etiquette, output grain, CLI shape |
 | v4.B | ✅ done | **`gaps` command**: Wayback availability adapter, `archive_checks`, the recoverable/lost/unknown partition |
 | v4.C | ✅ done | **`report --gaps`**: citation-grain HTML artifact in its own file |
+| v4.D | ✅ done | **`--report` on `crawl`, `check`, `gaps`**: long runs keep their own page fresh |
 
 **v4.A** — ✅ planned 2026-07-27. Two facts from the existing corpus set the shape, and both were measured rather than assumed.
 
@@ -491,6 +492,12 @@ A first real slice returned **3 recoverable, 1 lost** — the lost one being `bo
 That requirement caught a real bug. A circuit-tripped run called `beat.finish("ok")` — so a `gaps` run left going overnight that hit five refusals in its first minute would have reported **ok** on return, implying it finished. It now finishes as `incomplete` with the number of URLs still queued, and both the terminal and the page say so.
 
 **Un-asked citations render as `pending`, never as `lost`.** Hiding them, or defaulting them to lost, would make a partial run look like a completed one — the same class of error as reading a refused request as "no copy exists". The page states the distinction in its own footer: *"lost" means no usable copy was found, not that none can exist.*
+
+**v4.D** — ✅ shipped 2026-07-27, from an operator question rather than a plan: *"if I run `gaps` without running `report`, does the HTML update?"* It did not. Only the `report` command ever wrote the page, so a stage left running overnight left a file frozen at whenever `report` last ran — showing nothing happening while everything was. The documented workaround was a second terminal running `report --watch`, which is a sharp edge, and forgetting it is silent.
+
+`crawl`, `check` and `gaps` now take `--report`, re-rendering the page from inside the run. The `Refresher` mirrors the heartbeat's discipline exactly: throttled by wall clock (rendering thousands of rows per item would make the page the bottleneck instead of the work), never fatal (a rendering failure must not kill the crawl it describes), and written whole then renamed so a browser refreshing on a timer never reads a half-written file. A final forced render runs at the end, so the last state on the page is the finished one rather than whatever the throttle left behind.
+
+It reads on its own connection rather than the stage's: the stages hold a write transaction open across a checkpoint interval, and rendering from inside it would show a page the rest of the world cannot see yet. WAL permits any number of readers alongside one writer, so a separate reader is both correct and free.
 
 ### v5+ — candidate tiers (not committed)
 

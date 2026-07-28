@@ -232,6 +232,7 @@ def run(
     states: str | None = None,
     force: bool = False,
     concurrency: int | None = None,
+    refresher=None,
 ) -> CheckStats:
     """Execute the domain-check stage."""
     from concurrent.futures import ThreadPoolExecutor
@@ -348,9 +349,13 @@ def run(
                     if done % CHECKPOINT_EVERY == 0:
                         conn.execute("COMMIT")
                         conn.execute("BEGIN")
+                    if refresher is not None:
+                        refresher.maybe()
                     if done % 100 == 0 or done == len(targets):
                         log.progress(f"checked {done:,}/{len(targets):,}")
             beat.finish("ok")
+            if refresher is not None:
+                refresher.maybe(force=True)
             beat_conn.close()
             conn.execute("COMMIT")
 

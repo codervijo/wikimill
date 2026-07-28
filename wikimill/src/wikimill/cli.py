@@ -9,6 +9,7 @@ names its phase is far better than a missing command or a stack trace.
 
 from __future__ import annotations
 
+import contextlib
 import json as jsonlib
 import sys
 from pathlib import Path
@@ -395,6 +396,14 @@ def crawl(
     force: Annotated[
         bool, typer.Option("--force", help="Re-check terminal/not-yet-due records.")
     ] = False,
+    live_report: Annotated[
+        bool,
+        typer.Option(
+            "--report",
+            help="Keep the HTML page updated as the run works, so a long job "
+                 "left unattended stays visible without a second terminal.",
+        ),
+    ] = False,
     reclassify: Annotated[
         bool,
         typer.Option(
@@ -411,7 +420,9 @@ def crawl(
         if reclassify:
             classify_stage.run(cfg, log, limit=limit, force=force)
             return
-        crawl_stage.run(cfg, log, limit=limit, concurrency=concurrency, force=force)
+        with _maybe_refresher(cfg, live_report, "report") as refresher:
+            crawl_stage.run(cfg, log, limit=limit, concurrency=concurrency,
+                            force=force, refresher=refresher)
 
 
 @app.command()
@@ -426,13 +437,22 @@ def check(
         typer.Option("--concurrency", help="Parallel workers. RDAP stays bounded "
                                            "per registry regardless."),
     ] = None,
+    live_report: Annotated[
+        bool,
+        typer.Option(
+            "--report",
+            help="Keep the HTML page updated as the run works, so a long job "
+                 "left unattended stays visible without a second terminal.",
+        ),
+    ] = False,
 ) -> None:
     """Run DNS + RDAP against due domains; the only place `unregistered` is set."""
     cfg = load_config()
     with RunLog(RunKind.CHECK, cfg.logs_dir) as log:
         gate(cfg, log)
-        domain_stage.run(cfg, log, limit=limit, states=state, force=force,
-                         concurrency=concurrency)
+        with _maybe_refresher(cfg, live_report, "report") as refresher:
+            domain_stage.run(cfg, log, limit=limit, states=state, force=force,
+                             concurrency=concurrency, refresher=refresher)
 
 
 @app.command()
@@ -618,6 +638,22 @@ def export_cmd(
             )
 
 
+@contextlib.contextmanager
+def _maybe_refresher(cfg, enabled: bool, kind: str):
+    """A `Refresher` on its own connection, or None.
+
+    Its own connection rather than the stage's: the stages hold a write
+    transaction open across a checkpoint interval, and rendering from inside it
+    would be reading a page the rest of the world cannot see yet. A separate
+    *reader* is safe — WAL allows any number of them alongside one writer.
+    """
+    if not enabled:
+        yield None
+        return
+    with open_db(cfg.db_path) as conn:
+        yield report_mod.Refresher(cfg=cfg, conn=conn, kind=kind)
+
+
 @app.command()
 def gaps(
     limit: Annotated[
@@ -630,20 +666,30 @@ def gaps(
         bool,
         typer.Option("--dry-run", help="Report what would be asked, ask nothing."),
     ] = False,
+    live_report: Annotated[
+        bool,
+        typer.Option(
+            "--report",
+            help="Keep the HTML page updated as the run works, so a long job "
+                 "left unattended stays visible without a second terminal.",
+        ),
+    ] = False,
 ) -> None:
     """Ask the Wayback Machine which dead citations still have a usable copy."""
     cfg = load_config()
     pol = policy_mod.load(cfg.root)
     with RunLog(RunKind.EXPORT, cfg.logs_dir) as log:
         gate(cfg, log)
-        gaps_mod.run(
-            cfg, log,
-            limit=limit if limit is not None else pol.gaps.limit,
-            force=force,
-            dry_run=dry_run,
-            endpoint=pol.gaps.endpoint,
-            delay=pol.gaps.delay_seconds,
-        )
+        with _maybe_refresher(cfg, live_report, "gaps") as refresher:
+            gaps_mod.run(
+                cfg, log,
+                limit=limit if limit is not None else pol.gaps.limit,
+                force=force,
+                dry_run=dry_run,
+                endpoint=pol.gaps.endpoint,
+                delay=pol.gaps.delay_seconds,
+                refresher=refresher,
+            )
 
 
 @app.command()

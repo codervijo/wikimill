@@ -315,6 +315,7 @@ def run(
     limit: int | None = None,
     concurrency: int | None = None,
     force: bool = False,
+    refresher=None,
 ) -> CrawlStats:
     """Execute the crawl stage."""
     from concurrent.futures import ThreadPoolExecutor
@@ -410,6 +411,8 @@ def run(
                         robots_mod.persist_store(conn, robots_store)
                         conn.execute("COMMIT")
                         conn.execute("BEGIN")
+                    if refresher is not None:
+                        refresher.maybe()
                     if done % 10 == 0 or done == pending:
                         log.progress(
                             f"checked {done:,}/{pending:,} "
@@ -428,6 +431,8 @@ def run(
             beat.finish("failed", note=f"{type(exc).__name__}: {exc}")
             raise
         beat.finish("ok")
+        if refresher is not None:
+            refresher.maybe(force=True)
         beat_conn.close()
         robots_written = robots_mod.persist_store(conn, robots_store)
         conn.execute("COMMIT")
